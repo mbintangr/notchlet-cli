@@ -361,7 +361,8 @@ async function discoverCapabilities(profile: AuthProfile, options: IntegrationOp
   const response = await (options.fetch ?? fetch)(`${profile.origin}/development/v1/capabilities`, { headers: { Authorization: `Bearer ${token}`, 'X-Notchlet-Client-Version': '0.1.0' } });
   if (response.status === 401) throw Object.assign(new Error('Server rejected the credential; authenticate again.'), { diagnostic: 'credential_revoked' });
   if (response.status === 403) throw Object.assign(new Error('Credential lacks the required workspace:read scope.'), { diagnostic: 'scope_insufficient' });
-  if (!response.ok) throw Object.assign(new Error('Capabilities endpoint is unavailable.'), { diagnostic: 'server_unavailable' });
+  if (response.status === 404) throw Object.assign(new Error('Capabilities endpoint was not found. The server deployment may be missing the Development API route; update/redeploy the backend and ensure DEVELOPMENT_API_ENABLED is not set to false.'), { diagnostic: 'endpoint_not_found' });
+  if (!response.ok) throw Object.assign(new Error(`Capabilities endpoint is unavailable (HTTP ${response.status}).`), { diagnostic: 'server_unavailable' });
   const capabilities = await response.json() as Capabilities;
   const version = (v: string) => v.split('.').map((x: string) => Number(x));
   const compare = (a: number[], b: number[]) => (a[0] - b[0]) || ((a[1] ?? 0) - (b[1] ?? 0));

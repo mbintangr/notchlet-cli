@@ -194,7 +194,7 @@ test('documented account setup authenticates against an isolated HTTP backend wi
   }
 });
 
-test('doctor reports stable offline and server_unavailable diagnostics while local-only CLI status remains usable', async () => {
+test('doctor distinguishes offline from a missing capabilities route while local-only CLI status remains usable', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'notchlet-doctor-offline-'));
   const config = path.join(dir, 'config'), root = path.join(dir, 'workspace');
   const oldConfig = process.env.NOTCHLET_CONFIG_DIR, oldToken = process.env.NOTCHLET_TOKEN;
@@ -204,7 +204,7 @@ test('doctor reports stable offline and server_unavailable diagnostics while loc
     const offline = await doctor(null, { server: 'https://offline.example', fetch: (async () => { throw new Error('offline-test-secret must stay private'); }) as typeof fetch });
     const missingRoute = await doctor(null, { server: 'https://offline.example', fetch: (async () => new Response('not found', { status: 404 })) as typeof fetch });
     assert.equal(offline.diagnostic, 'offline');
-    assert.equal(missingRoute.diagnostic, 'server_unavailable');
+    assert.equal(missingRoute.diagnostic, 'endpoint_not_found');
     assert.doesNotMatch(JSON.stringify([offline, missingRoute]), /offline-test-secret|must stay private/);
     await mkdir(root); await initWorkspace(root);
     const cli = process.env.NOTCHLET_PACKED_CLI_PATH ?? path.resolve('dist/cli.js');
@@ -277,6 +277,8 @@ test('doctor produces bounded redacted diagnostics for revoked or insufficient c
     assert.equal(revoked.diagnostic, 'credential_revoked');
     const denied = await doctor(null, { server: 'https://doctor.example', fetch: (async () => new Response('', { status: 403 })) as typeof fetch });
     assert.equal(denied.diagnostic, 'scope_insufficient');
+    const missingRoute = await doctor(null, { server: 'https://doctor.example', fetch: (async () => new Response('', { status: 404 })) as typeof fetch });
+    assert.equal(missingRoute.diagnostic, 'endpoint_not_found');
     assert.doesNotMatch(JSON.stringify([revoked, denied]), /never-report-this-token/);
   } finally {
     if (oldConfig === undefined) delete process.env.NOTCHLET_CONFIG_DIR; else process.env.NOTCHLET_CONFIG_DIR = oldConfig;
