@@ -47,7 +47,7 @@ for (const scenario of [
       const taskPath = path.join(root, '.notchlet', 'changes', changeId, 'tasks.json');
       const change = JSON.parse(await readFile(taskPath, 'utf8'));
       Object.assign(change, {
-        intent: fixture.split('## Request\n\n')[1].split('\n')[0],
+        intent: fixture.replace(/\r\n/g, '\n').split('## Request\n\n')[1].split('\n')[0],
         outcome: `Satisfy acceptance checks from ${scenario.fixture}`,
         requirements: [{ id: 'REQ-1', title: 'Fixture acceptance', description: 'Meet all fixture acceptance checks.' }],
         checks: [{ id: 'CHECK-1', description: 'Run fixture acceptance checks.' }],

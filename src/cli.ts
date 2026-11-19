@@ -109,7 +109,7 @@ async function syncIfAutomatic(root: string, changeId: string) {
   }
   if (mode !== 'auto') return null;
   const { autoSyncChange } = await import('./integration.js');
-  return autoSyncChange(root, changeId, { server: serverOption(), endpoint: optionValue('--endpoint') });
+  return autoSyncChange(root, changeId, { server: optionValue('--server'), endpoint: optionValue('--endpoint') });
 }
 
 function printWithSync(result: unknown, automaticSync: unknown | null, human?: string) {
@@ -177,7 +177,7 @@ Options:
       }
       if (!['login', 'status', 'logout'].includes(action ?? '')) fail('usage_error', usage, 'Run `notchlet --help` for command syntax.', 64);
       const { authCommand } = await import('./auth.js');
-      const result = await authCommand(action, { server: serverOption(), allowFileStore: args.includes('--allow-file-token-store'), json });
+      const result = await authCommand(action, { server: action === 'login' ? serverOption() : optionValue('--server'), allowFileStore: args.includes('--allow-file-token-store'), json });
       if (json) { print(result); }
       else if (action === 'login') {
         const p = (result as any).profile;
@@ -328,7 +328,7 @@ Options:
       }
       const root = await workspace();
       const { doctor } = await import('./integration.js');
-      const result = await doctor(root, { server: serverOption(), endpoint: optionValue('--endpoint'), allowFileStore: args.includes('--allow-file-token-store') });
+      const result = await doctor(root, { server: optionValue('--server'), endpoint: optionValue('--endpoint'), allowFileStore: args.includes('--allow-file-token-store') });
       if (json) { print(result); }
       else {
         const p = result.profile;
@@ -360,7 +360,8 @@ Options:
       if (mode !== 'auto' && mode !== 'manual') fail('usage_error', usage, 'Choose `notchlet sync mode auto` or `notchlet sync mode manual`.', 64);
       const { setWorkspaceSyncMode } = await import('./integration.js');
       const result = await setWorkspaceSyncMode(root, mode);
-      console.log(box([
+      if (json) print({ ...result, workspace: root });
+      else console.log(box([
         section('Sync mode updated'),
         kv('Workspace', root),
         kv('Sync mode', result.syncMode),
@@ -389,7 +390,7 @@ Options:
       const id = optionValue('--change') ?? (isTty() ? await prompt('Change ID: ') : undefined);
       if (!['status', 'push', 'pull', 'resolve'].includes(action ?? '') || !id) fail('usage_error', usage, 'Use `notchlet sync <status|push|pull|resolve> --change <id> [--yes] [--keep-local]`.', 64);
       const { syncStatus, syncPush, syncPull, syncResolve } = await import('./integration.js');
-      const syncOptions = { server: serverOption(), endpoint: optionValue('--endpoint'), yes: args.includes('--yes') };
+      const syncOptions = { server: optionValue('--server'), endpoint: optionValue('--endpoint'), yes: args.includes('--yes') };
       if (action === 'status') {
         const automaticSync = await syncIfAutomatic(root, id);
         const result = await syncStatus(root, id, syncOptions);
@@ -488,7 +489,7 @@ Options:
       const backlogStatus = optionValue('--backlog-status');
       if (!id || !name || (backlogStatus !== undefined && !['TODO', 'IN_PROGRESS', 'IN_REVIEW', 'DONE'].includes(backlogStatus))) fail('usage_error', usage, 'Provide --change, --name, and an optional supported --backlog-status.', 64);
       const { syncCheckpoint } = await import('./integration.js');
-      const result = await syncCheckpoint(root, id, { name, ...(optionValue('--summary') === undefined ? {} : { summary: optionValue('--summary') }), ...(backlogStatus === undefined ? {} : { backlogStatus: backlogStatus as 'TODO' | 'IN_PROGRESS' | 'IN_REVIEW' | 'DONE' }) }, { server: serverOption(), endpoint: optionValue('--endpoint') });
+      const result = await syncCheckpoint(root, id, { name, ...(optionValue('--summary') === undefined ? {} : { summary: optionValue('--summary') }), ...(backlogStatus === undefined ? {} : { backlogStatus: backlogStatus as 'TODO' | 'IN_PROGRESS' | 'IN_REVIEW' | 'DONE' }) }, { server: optionValue('--server'), endpoint: optionValue('--endpoint') });
       if (json) { print(result); }
       else {
         const c = (result as any).checkpoint;
@@ -546,7 +547,7 @@ Options:
       const productId = await requiredNumber(optionValue('--product-id'), 'Product ID: ');
       if (!Number.isSafeInteger(itemId) || !Number.isSafeInteger(productId)) fail('usage_error', usage, 'Provide numeric item ID and --product-id.', 64);
       const { importBacklogItem } = await import('./integration.js');
-      const change = await importBacklogItem(root, { itemId: itemId!, productId: productId!, server: serverOption(), endpoint: optionValue('--endpoint'), allowFileStore: args.includes('--allow-file-token-store') });
+      const change = await importBacklogItem(root, { itemId: itemId!, productId: productId!, server: optionValue('--server'), endpoint: optionValue('--endpoint'), allowFileStore: args.includes('--allow-file-token-store') });
       printWithSync({ change }, await syncIfAutomatic(root, change.id), `Imported backlog item ${itemId} as change ${change.id}.`);
     }
     else if (command === 'init') {
