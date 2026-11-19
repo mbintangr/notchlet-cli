@@ -1,10 +1,12 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readFile, readdir, stat, writeFile, mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const repositoryRoot = path.resolve(packageRoot, '../..');
+const repositoryRoot = path.resolve(packageRoot, '..');
+const skillsRepoRoot = path.resolve(repositoryRoot, 'notchlet-skills');
+const skillsSourceDir = path.join(skillsRepoRoot, 'skills');
 const sourcePath = path.join(packageRoot, 'guidance', 'notchlet-super.md');
 const source = await readFile(sourcePath, 'utf8');
 
@@ -23,7 +25,7 @@ for (const action of ['plan', 'revise', 'implement', 'verify', 'resume']) {
   if (!source.includes(`--action ${action}`)) throw new Error(`Canonical guidance does not reference its declared workflow action: ${action}`);
 }
 
-const skillLock = JSON.parse(await readFile(path.join(repositoryRoot, 'skills-lock.json'), 'utf8'));
+const skillLock = JSON.parse(await readFile(path.join(skillsRepoRoot, 'skills-lock.json'), 'utf8'));
 const aliases = JSON.parse(await readFile(path.join(packageRoot, 'guidance', 'aliases.json'), 'utf8'));
 const requiredSkills = ['notchlet-mcp', 'notchlet-platform', 'notchlet-plan', 'notchlet-implement', 'notchlet-review', 'notchlet-deliver'];
 for (const skill of requiredSkills) {
@@ -35,9 +37,10 @@ for (const [legacy, migration] of Object.entries(aliases.aliases ?? {})) {
   for (const command of migration.commands ?? []) if (!cliSource.includes(command)) throw new Error(`Alias ${legacy} maps to an unsupported CLI command: ${command}`);
 }
 
+const toolRoot = path.resolve(repositoryRoot, 'notchlet', 'notchlet-be', 'src', 'mcp', 'tools');
 const toolFiles = [
-  path.join(repositoryRoot, 'product-guy-be', 'src', 'mcp', 'tools', 'lifecycle.tools.ts'),
-  path.join(repositoryRoot, 'product-guy-be', 'src', 'mcp', 'tools', 'development.tools.ts'),
+  path.join(toolRoot, 'lifecycle.tools.ts'),
+  path.join(toolRoot, 'development.tools.ts'),
 ];
 const toolSources = await Promise.all(toolFiles.map(file => readFile(file, 'utf8')));
 const requiredTools = {
@@ -61,19 +64,28 @@ for (const action of ['plan', 'revise', 'implement', 'verify', 'resume']) {
 if (/notchlet-init|curl\s+[^\n]*\/mcp/i.test(source)) throw new Error('Canonical guidance contains a stale init or unauthenticated MCP GET assumption.');
 if (!/Explore \/ investigate \(read-only\)[\s\S]*?Do not run `notchlet init`/.test(source)) throw new Error('Explore guidance must explicitly be read-only and avoid initialization.');
 if (!/Plan only \(read-only unless asked to persist\)[\s\S]*?does not require initialization, an epic→story→task hierarchy, or application\/change-artifact writes/.test(source)) throw new Error('Planning guidance must be read-only by default and independent of initialization and backlog hierarchy.');
-const targets = [
-  path.join(packageRoot, 'guidance', 'generated', 'opencode', 'notchlet-super', 'SKILL.md'),
-  path.join(packageRoot, 'guidance', 'generated', 'claude-code', 'notchlet-super', 'SKILL.md'),
-];
-const sourceHash = createHash('sha256').update(source).digest('hex');
-const generated = [];
-for (const target of targets) {
-  await mkdir(path.dirname(target), { recursive: true });
-  await writeFile(target, source, 'utf8');
-  generated.push({ client: target.includes(`${path.sep}opencode${path.sep}`) ? 'opencode' : 'claude-code', path: path.relative(packageRoot, target).replace(/\\/g, '/'), sha256: sourceHash });
+
+const skillDirs = await readdir(skillsSourceDir);
+let skillCount = 0;
+for (const dir of skillDirs) {
+  const skillFile = path.join(skillsSourceDir, dir, 'SKILL.md');
+  let st;
+  try { st = await stat(skillFile); } catch { st = null; }
+  if (st?.isFile()) skillCount++;
 }
+
 const packageManifest = JSON.parse(await readFile(path.join(packageRoot, 'package.json'), 'utf8'));
-const manifest = { manifestVersion: 1, source: 'guidance/notchlet-super.md', sourceVersion: packageManifest.version, sourceSha256: sourceHash, targets: generated };
-await writeFile(path.join(packageRoot, 'guidance', 'generated', 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-await writeFile(path.join(packageRoot, 'guidance', 'generated', 'compatibility.json'), `${JSON.stringify({ skills: skillLock.skills, aliases: aliases.aliases, source: aliases.source }, null, 2)}\n`, 'utf8');
-console.log(`Generated ${targets.length} state-aware notchlet-super outputs from ${path.relative(repositoryRoot, sourcePath)}.`);
+const manifest = {
+  manifestVersion: 1,
+  source: 'guidance/notchlet-super.md',
+  sourceVersion: packageManifest.version,
+  sourceSha256: createHash('sha256').update(source).digest('hex'),
+  skillsRepo: skillsRepoRoot,
+  skillCount,
+  skills: skillLock.skills,
+  aliases: aliases.aliases,
+};
+const manifestDir = path.join(packageRoot, 'guidance', 'generated');
+await mkdir(manifestDir, { recursive: true });
+await writeFile(path.join(manifestDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+console.log(`Validated ${skillCount} skills from ${skillsRepoRoot}. Skills are installed directly from the notchlet-skills repo at runtime.`);
