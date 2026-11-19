@@ -1,8 +1,8 @@
 {
   "manifestVersion": 1,
-  "source": "guidance/notchlet-super.md",
+  "source": "skills/notchlet-super/SKILL.md",
   "sourceVersion": "0.2.0",
-  "sourceSha256": "b815e49448a9d67f47919142f3ab3cbd0426dc6743666cca8ba5eb5f44e8a9e5",
+  "sourceSha256": "4e80a6103c8ec858477d7d4e9cd772ec5949d5b5454b7468def5933981a10fb8",
   "skillsRepo": "C:\\Users\\mbint\\orca\\notchlet-skills",
   "skillCount": 8,
   "skills": {
@@ -35,7 +35,7 @@
       "path": "skills/notchlet-review/SKILL.md"
     },
     "notchlet-super": {
-      "hash": "b815e49448a9d67f47919142f3ab3cbd0426dc6743666cca8ba5eb5f44e8a9e5",
+      "hash": "4e80a6103c8ec858477d7d4e9cd772ec5949d5b5454b7468def5933981a10fb8",
       "path": "skills/notchlet-super/SKILL.md"
     }
   },
@@ -85,7 +85,7 @@
     {
       "client": "opencode",
       "path": "guidance/generated/opencode/notchlet-super/SKILL.md",
-      "sha256": "b815e49448a9d67f47919142f3ab3cbd0426dc6743666cca8ba5eb5f44e8a9e5",
+      "sha256": "4e80a6103c8ec858477d7d4e9cd772ec5949d5b5454b7468def5933981a10fb8",
       "skill": "notchlet-super"
     },
     {
@@ -133,7 +133,7 @@
     {
       "client": "claude-code",
       "path": "guidance/generated/claude-code/notchlet-super/SKILL.md",
-      "sha256": "b815e49448a9d67f47919142f3ab3cbd0426dc6743666cca8ba5eb5f44e8a9e5",
+      "sha256": "4e80a6103c8ec858477d7d4e9cd772ec5949d5b5454b7468def5933981a10fb8",
       "skill": "notchlet-super"
     }
   ]

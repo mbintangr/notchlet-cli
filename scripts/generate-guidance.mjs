@@ -7,7 +7,7 @@ const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 const repositoryRoot = path.resolve(packageRoot, '..');
 const skillsRepoRoot = path.resolve(repositoryRoot, 'notchlet-skills');
 const skillsSourceDir = path.join(skillsRepoRoot, 'skills');
-const sourcePath = path.join(packageRoot, 'guidance', 'notchlet-super.md');
+const sourcePath = path.join(skillsSourceDir, 'notchlet-super', 'SKILL.md');
 const source = await readFile(sourcePath, 'utf8');
 
 const requiredCommands = [
@@ -100,7 +100,7 @@ const skillsMap = {};
 for (const e of skillEntries) skillsMap[e.name] = { hash: e.hash, path: `skills/${e.name}/SKILL.md` };
 const manifest = {
   manifestVersion: 1,
-  source: 'guidance/notchlet-super.md',
+  source: 'skills/notchlet-super/SKILL.md',
   sourceVersion: packageManifest.version,
   sourceSha256: createHash('sha256').update(source).digest('hex'),
   skillsRepo: skillsRepoRoot,

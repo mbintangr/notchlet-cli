@@ -7,11 +7,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const repositoryRoot = path.resolve(packageRoot, '../..');
+const repositoryRoot = path.resolve(packageRoot, '..');
+const skillsRepoRoot = path.resolve(repositoryRoot, 'notchlet-skills');
 
 test('canonical state-aware notchlet-super generates validated OpenCode and Claude Code guidance', async () => {
   execFileSync(process.execPath, [path.join(packageRoot, 'scripts', 'generate-guidance.mjs')], { cwd: repositoryRoot, stdio: 'pipe' });
-  const source = await readFile(path.join(packageRoot, 'guidance', 'notchlet-super.md'), 'utf8');
+  const source = await readFile(path.join(skillsRepoRoot, 'skills', 'notchlet-super', 'SKILL.md'), 'utf8');
   const opencode = await readFile(path.join(packageRoot, 'guidance', 'generated', 'opencode', 'notchlet-super', 'SKILL.md'), 'utf8');
   const claude = await readFile(path.join(packageRoot, 'guidance', 'generated', 'claude-code', 'notchlet-super', 'SKILL.md'), 'utf8');
   const manifest = JSON.parse(await readFile(path.join(packageRoot, 'guidance', 'generated', 'manifest.json'), 'utf8'));
