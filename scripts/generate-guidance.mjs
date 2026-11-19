@@ -17,8 +17,20 @@ const requiredCommands = [
 ];
 const cliSource = await readFile(path.join(packageRoot, 'src', 'cli.ts'), 'utf8');
 for (const command of requiredCommands) if (!cliSource.includes(command)) throw new Error(`Guidance references an unavailable CLI command: ${command}`);
-for (const syntax of ['sync status|push|pull|resolve --change', 'checkpoint --change', 'evidence record --change', 'instructions <change> [--action plan|revise|implement|verify|resume]', 'change new <name>', 'change list', 'change show <id>', 'change convert <id>', 'status [change]', 'validate <change>', 'task start <task-id> --change <id> --revision <n>', 'task complete <task-id> --change <id> --revision <n>', 'backlog import <item-id>']) {
+for (const syntax of ['sync status|push|pull|resolve --change', 'checkpoint --change', 'evidence record --change', 'instructions <change-name|id> [--action plan|revise|implement|verify|resume]', 'change new <name>', 'change list', 'change show <name|id>', 'change convert <name|id>', 'status [change-name|id]', 'validate <change>', 'task start <task-name|id> --change <name|id> --revision <n>', 'task complete <task-name|id> --change <name|id> --revision <n>', 'backlog import <item-key|title|id>', 'mcp serve --server <url>', 'mcp status [--server <url>]', 'mcp disconnect [--client opencode|claude]', 'mcp revoke [--server <url>]']) {
   if (!cliSource.includes(syntax)) throw new Error(`Guidance syntax is not present in CLI help: ${syntax}`);
+}
+const mcpSkillSource = await readFile(path.join(skillsSourceDir, 'notchlet-mcp', 'SKILL.md'), 'utf8');
+const mcpConfigSource = await readFile(path.join(packageRoot, 'src', 'mcp-config.ts'), 'utf8');
+const mcpManagementSource = await readFile(path.join(packageRoot, 'src', 'mcp-management.ts'), 'utf8');
+for (const scope of ['workspace:read', 'backlog:write', 'changes:write', 'documents:write', 'tickets:write', 'generation:run', 'issues:sync']) {
+  if (!mcpManagementSource.includes(`'${scope}'`)) throw new Error(`Configured MCP scope is not present in CLI management: ${scope}`);
+}
+for (const shape of ['mcp.servers', 'mcpServers', "type: 'stdio'"]) {
+  if (!mcpConfigSource.includes(shape)) throw new Error(`Guidance client config shape is not supported by the CLI: ${shape}`);
+}
+if (!mcpSkillSource.includes('notchlet init --interactive') || !mcpSkillSource.includes('notchlet mcp status') || /your-mcp-token|curl\s+[^\n]*\/mcp|pg\.mbintangr\.com\/mcp/i.test(mcpSkillSource)) {
+  throw new Error('notchlet-mcp guidance must explain supported init/status setup without a static token, old hosted origin, or unauthenticated GET probe.');
 }
 for (const action of ['plan', 'revise', 'implement', 'verify', 'resume']) {
   if (!cliSource.includes(`'${action}'`)) throw new Error(`Guidance references an unsupported workflow action: ${action}`);
@@ -103,7 +115,7 @@ const manifest = {
   source: 'skills/notchlet-super/SKILL.md',
   sourceVersion: packageManifest.version,
   sourceSha256: createHash('sha256').update(source).digest('hex'),
-  skillsRepo: skillsRepoRoot,
+  skillsRepo: aliases.source,
   skillCount: skillEntries.length,
   skills: skillsMap,
   targets,

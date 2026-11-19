@@ -9,6 +9,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { appendEvidence, CORE_VERSION, parseCliJsonEnvelope } from '@notchlet/core';
 import { authCommand, type CredentialStore } from './auth.js';
+import { callMcpTool } from './integration.js';
 
 
 function npm(args: string[], cwd?: string) {
@@ -221,7 +222,7 @@ test('task start and complete subcommands use expected revisions and preserve th
     change.tasks = [{ id: 'TASK-1', title: 'Implement behavior', status: 'pending', dependencies: [], requirementIds: ['REQ-1'] }];
     await writeFile(tasksFile, JSON.stringify(change, null, 2));
 
-    const started = run(['task', 'start', 'TASK-1', '--change', changeId, '--revision', '5']);
+    const started = run(['task', 'start', 'Implement behavior', '--change', 'Task commands', '--revision', '5']);
     assert.equal(started.status, 0, started.stderr);
     assert.equal(JSON.parse(started.stdout).data.revision, 6);
     assert.equal(JSON.parse(await readFile(tasksFile, 'utf8')).tasks[0].status, 'in_progress');
@@ -231,7 +232,7 @@ test('task start and complete subcommands use expected revisions and preserve th
     assert.equal(JSON.parse(completed.stdout).data.revision, 7);
     assert.equal(JSON.parse(await readFile(tasksFile, 'utf8')).tasks[0].status, 'completed');
 
-    const legacyUpdate = run(['task', 'update', changeId, 'TASK-1', 'pending', '7']);
+    const legacyUpdate = run(['task', 'update', 'Task commands', 'Implement behavior', 'pending', '7']);
     assert.equal(legacyUpdate.status, 0, legacyUpdate.stderr);
     assert.equal(JSON.parse(legacyUpdate.stdout).data.revision, 8);
     const stale = run(['task', 'complete', 'TASK-1', '--change', changeId, '--revision', '7']);
@@ -362,6 +363,8 @@ test('workspace bind CLI uses the nearest nested workspace unless --workspace se
   const config = path.join(parent, 'config'), cli = process.env.NOTCHLET_PACKED_CLI_PATH ?? path.resolve('dist/cli.js');
   const oldConfig = process.env.NOTCHLET_CONFIG_DIR, oldToken = process.env.NOTCHLET_TOKEN;
   process.env.NOTCHLET_CONFIG_DIR = config; process.env.NOTCHLET_TOKEN = 'binding-command-local-token';
+  const backlogItems: any[] = [{ id: 55, productId: 31, parentId: null, itemType: 'STORY', key: 'APP-55', title: 'Packed import fixture', description: 'Packed CLI import acceptance.', acceptanceCriteria: ['Preserve the selected item description.'], status: 'TODO' }];
+  let nextBacklogId = 56;
   const server = createServer((req, res) => {
     if (req.method !== 'POST') { res.writeHead(405).end(); return; }
     let body = ''; req.setEncoding('utf8'); req.on('data', chunk => body += chunk); req.on('end', () => {
@@ -369,14 +372,24 @@ test('workspace bind CLI uses the nearest nested workspace unless --workspace se
       if (message.method === 'notifications/initialized') { res.writeHead(202).end(); return; }
       let result: any;
       if (message.method === 'initialize') result = { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'cli-binding-mock', version: '1.0.0' } };
-       else if (message.method === 'tools/list') result = { tools: ['workspace_context', 'product_get_details', 'backlog_list', 'backlog_get', 'backlog_development_context'].map(name => ({ name, description: name, inputSchema: { type: 'object', properties: {} } })) };
-      else if (message.method === 'tools/call') {
-        const { name, arguments: args = {} } = message.params;
-         const value = name === 'workspace_context' ? [{ id: 3, teams: [{ products: [{ id: 31 }] }] }]
-           : name === 'product_get_details' ? { id: 31 }
-           : name === 'backlog_list' ? [{ id: 55, productId: 31 }]
-           : name === 'backlog_get' ? { id: Number(args.itemId), productId: 31, title: 'Packed import fixture', description: 'Packed CLI import acceptance.', acceptanceCriteria: ['Preserve the selected item description.'] }
-           : { itemId: Number(args.itemId), section: args.section ?? 'repositories', items: args.section === 'item' ? [{ summary: 'Selected-item context' }] : [{ id: 7, provider: 'GITHUB', repoOwner: 'example', repoName: 'repo', serverUrl: null }], nextCursor: null };
+       else if (message.method === 'tools/list') result = { tools: [
+         { name: 'workspace_context', description: 'Workspace', inputSchema: { type: 'object', properties: {} } },
+         { name: 'product_get_details', description: 'Product', inputSchema: { type: 'object', properties: { productId: { type: 'integer' } }, required: ['productId'] } },
+         { name: 'workspace_search', description: 'Search', inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
+         { name: 'backlog_list', description: 'Backlog', inputSchema: { type: 'object', properties: { productId: { type: 'integer' } }, required: ['productId'] } },
+         { name: 'backlog_create', description: 'Create backlog item', inputSchema: { type: 'object', properties: { productId: { type: 'integer' }, itemType: { type: 'string' }, title: { type: 'string' }, parentId: { type: 'integer' } }, required: ['productId', 'itemType', 'title'] } },
+         { name: 'backlog_get', description: 'Read backlog item', inputSchema: { type: 'object', properties: { itemId: { type: 'integer' } }, required: ['itemId'] } },
+         { name: 'backlog_development_context', description: 'Bounded context', inputSchema: { type: 'object', properties: { itemId: { type: 'integer' }, section: { type: 'string' }, limit: { type: 'integer' } }, required: ['itemId'] } },
+       ] };
+       else if (message.method === 'tools/call') {
+         const { name, arguments: args = {} } = message.params;
+          const value = name === 'workspace_context' ? [{ id: 3, teams: [{ products: [{ id: 31 }] }] }]
+            : name === 'product_get_details' ? { id: 31 }
+            : name === 'workspace_search' ? backlogItems.filter(item => `${item.key} ${item.title}`.toLowerCase().includes(String(args.query).toLowerCase()))
+            : name === 'backlog_list' ? backlogItems.filter(item => item.productId === Number(args.productId))
+            : name === 'backlog_create' ? (() => { const created = { id: nextBacklogId++, productId: Number(args.productId), parentId: Number(args.parentId), itemType: args.itemType, key: `APP-${nextBacklogId - 1}`, title: args.title, description: '', status: 'TODO' }; backlogItems.push(created); return created; })()
+            : name === 'backlog_get' ? backlogItems.find(item => item.id === Number(args.itemId))
+            : { itemId: Number(args.itemId), section: args.section ?? 'repositories', items: args.section === 'item' ? [{ summary: 'Selected-item context' }] : [{ id: 7, provider: 'GITHUB', repoOwner: 'example', repoName: 'repo', serverUrl: null }], nextCursor: null };
         result = { content: [{ type: 'text', text: JSON.stringify(value) }] };
       } else { res.writeHead(400).end(); return; }
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id, result }));
@@ -386,7 +399,7 @@ test('workspace bind CLI uses the nearest nested workspace unless --workspace se
   const address = server.address(); assert(address && typeof address !== 'string');
   const endpoint = `http://127.0.0.1:${address.port}/mcp`;
   const preload = path.join(parent, 'fetch-mock.mjs');
-  await writeFile(preload, `const nativeFetch = globalThis.fetch.bind(globalThis); globalThis.fetch = async (input, init) => { const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url); if (url.href === 'https://cli-bind.example/development/v1/capabilities') return new Response(JSON.stringify({ server: { id: 'cli-bind-server', version: '1.0.0' }, protocol: { minimum: '1.0', maximum: '1.0' }, versions: { core: '1.0.0', schema: '1.0.0' }, operations: ['read'] }), { headers: { 'content-type': 'application/json' } }); return nativeFetch(input, init); };\n`);
+  await writeFile(preload, `const nativeFetch = globalThis.fetch.bind(globalThis); globalThis.fetch = async (input, init) => { const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url); if (url.href === 'https://cli-bind.example/development/v1/capabilities') return new Response(JSON.stringify({ server: { id: 'cli-bind-server', version: '1.0.0' }, protocol: { minimum: '1.0', maximum: '1.0' }, versions: { core: '1.0.0', schema: '1.0.0' }, operations: ['read'] }), { headers: { 'content-type': 'application/json' } }); if (url.pathname === '/organizations/mine') return Response.json([{id:3,name:'Fixture organization'}]); if (url.href === 'https://cli-bind.example/products?organizationId=3') return Response.json([{id:31,name:'Fixture Product'}]); if (url.href === 'https://cli-bind.example/git/config?productId=31') return Response.json([{id:7,provider:'GITHUB',repoOwner:'example',repoName:'repo',repoLabel:'example/repo'}]); if (url.href === 'https://cli-bind.example/backlog?productId=31') return Response.json([{id:55,productId:31,key:'APP-55',title:'Packed import fixture',status:'TODO'}]); return nativeFetch(input, init); };\n`);
   const cliEnv = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import=${JSON.stringify(pathToFileURL(preload).href)}` };
   const runCli = (args: string[], cwd: string) => new Promise<{ status: number | null; stdout: string; stderr: string }>(resolve => {
     const child = spawn(process.execPath, [cli, ...args], { cwd, env: cliEnv });
@@ -403,7 +416,7 @@ test('workspace bind CLI uses the nearest nested workspace unless --workspace se
       const git = spawnSync('git', ['init'], { cwd: root, encoding: 'utf8' }); assert.equal(git.status, 0, git.stderr);
       const remote = spawnSync('git', ['remote', 'add', 'origin', 'https://github.com/example/repo.git'], { cwd: root, encoding: 'utf8' }); assert.equal(remote.status, 0, remote.stderr);
     }
-    const bindArgs = ['workspace', 'bind', '--server', 'https://cli-bind.example', '--product-id', '31', '--repository-id', '7', '--endpoint', endpoint, '--json'];
+    const bindArgs = ['workspace', 'bind', '--server', 'https://cli-bind.example', '--product', 'Fixture Product', '--repository', 'example/repo', '--endpoint', endpoint, '--json'];
     const nearest = await runCli(bindArgs, nested);
     assert.equal(nearest.status, 0, `${nearest.stderr}\n${nearest.stdout}`);
     assert.equal(JSON.parse(await readFile(path.join(nested, '.notchlet', 'workspace.json'), 'utf8')).binding.gitRoot, nested);
@@ -411,12 +424,34 @@ test('workspace bind CLI uses the nearest nested workspace unless --workspace se
     assert.equal(explicit.status, 0, `${explicit.stderr}\n${explicit.stdout}`);
     assert.equal(JSON.parse(await readFile(path.join(outer, '.notchlet', 'workspace.json'), 'utf8')).binding.gitRoot, outer);
 
-    const imported = await runCli(['backlog', 'import', '55', '--product-id', '31', '--server', 'https://cli-bind.example', '--endpoint', endpoint, '--json'], nested);
+    const toolOptions = { server: 'https://cli-bind.example', endpoint };
+    const found = await callMcpTool<any>('workspace_search', { query: 'APP-55' }, toolOptions);
+    const foundItems = JSON.parse(found.content.find((part: any) => part.type === 'text').text);
+    assert.equal(foundItems[0].title, 'Packed import fixture');
+    const createdChild = await callMcpTool<any>('backlog_create', { productId: 31, itemType: 'TASK', title: 'Add fixture verification', parentId: 55 }, toolOptions);
+    const childItem = JSON.parse(createdChild.content.find((part: any) => part.type === 'text').text);
+    assert.equal(childItem.parentId, 55);
+    const verifiedItems = await callMcpTool<any>('backlog_list', { productId: 31 }, toolOptions);
+    assert.equal(JSON.parse(verifiedItems.content.find((part: any) => part.type === 'text').text).some((item: any) => item.id === childItem.id && item.parentId === 55), true);
+
+    const imported = await runCli(['backlog', 'import', 'APP-55', '--server', 'https://cli-bind.example', '--endpoint', endpoint, '--json'], nested);
     assert.equal(imported.status, 0, `${imported.stderr}\n${imported.stdout}`);
     const importedChange = JSON.parse(imported.stdout).data.change;
     assert.equal(importedChange.requirements[0].id, 'REQ-ITEM-55');
     assert.equal(importedChange.requirements[0].title, 'Packed import fixture');
     assert.match(await readFile(path.join(nested, '.notchlet', 'changes', importedChange.id, 'proposal.md'), 'utf8'), /Packed CLI import acceptance/);
+
+    const taskStart = await runCli(['task', 'start', 'Implement backlog item 55', '--change', importedChange.name, '--revision', '0', '--json'], nested);
+    assert.equal(taskStart.status, 0, `${taskStart.stderr}\n${taskStart.stdout}`);
+    assert.equal(JSON.parse(await readFile(path.join(nested, '.notchlet', 'changes', importedChange.id, 'tasks.json'), 'utf8')).tasks[0].status, 'in_progress');
+    const taskComplete = await runCli(['task', 'complete', 'Implement backlog item 55', '--change', importedChange.name, '--revision', '1', '--json'], nested);
+    assert.equal(taskComplete.status, 0, `${taskComplete.stderr}\n${taskComplete.stdout}`);
+
+    const evidencePath = path.join(nested, 'backlog verification.json');
+    await writeFile(evidencePath, JSON.stringify({ kind: 'check', outcome: 'passed', summary: 'Backlog item acceptance was verified.', command: 'mock integration workflow', requirementIds: ['REQ-ITEM-55'], taskIds: ['TASK-ITEM-55'], checkIds: ['CHECK-ITEM-55-1'], provenance: 'recorded' }));
+    const evidence = await runCli(['evidence', 'record', '--change', importedChange.name, '--file', evidencePath, '--json'], nested);
+    assert.equal(evidence.status, 0, `${evidence.stderr}\n${evidence.stdout}`);
+    assert.equal((await readFile(path.join(nested, '.notchlet', 'changes', importedChange.id, 'evidence.jsonl'), 'utf8')).trim().split('\n').length, 1);
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
     if (oldConfig === undefined) delete process.env.NOTCHLET_CONFIG_DIR; else process.env.NOTCHLET_CONFIG_DIR = oldConfig;
@@ -481,7 +516,7 @@ test('interactive setup in the CLI process selects catalog entries using isolate
     await writeFile(preload, `
 import readline from 'node:readline/promises';
 import { registerHooks, syncBuiltinESMExports } from 'node:module';
-const answers = ['2', 'https://interactive.invalid', 'fixture@example.test', '1', '1', '1', '2'];
+const answers = ['2', '1', '1', '1', 'https://interactive.invalid', 'fixture@example.test', '1', '1', '1', '2'];
 readline.createInterface = () => ({ question: async prompt => { process.stderr.write(prompt); if (!answers.length) throw Error('Unexpected prompt'); return answers.shift(); }, close() {} });
 syncBuiltinESMExports();
 Object.defineProperty(process.stdin, 'isTTY', { value: true });
@@ -501,11 +536,13 @@ globalThis.fetch = async (input, init) => {
  else if (url.pathname === '/products/31') value={id:31};
  else if (url.pathname === '/git/config') value=[{id:7,provider:'GITHUB',repoOwner:'example',repoName:'repo'}];
  else if (url.pathname === '/development/v1/capabilities') value={server:{id:'interactive-server',version:'1.0.0'},protocol:{minimum:'1.0',maximum:'1.0'},versions:{core:'1.0.0',schema:'1.0.0'},operations:['read']};
+ else if (url.pathname === '/mcp/settings') value={enabled:true};
+ else if (url.pathname === '/mcp/settings/credentials' && init?.method === 'POST') { const body=JSON.parse(init.body); value={id:44,name:body.name,scopes:body.scopes,createdAt:'2026-01-01T00:00:00.000Z',secret:'mcp_live_fixture_secret'}; }
  else throw Error('Unexpected fixture route '+url.pathname);
  return Response.json(value);
 };
 `);
-    const env: NodeJS.ProcessEnv = { ...process.env, NOTCHLET_CONFIG_DIR: config };
+    const env: NodeJS.ProcessEnv = { ...process.env, NOTCHLET_CONFIG_DIR: config, NOTCHLET_MCP_VERIFY: '0' };
     for (const name of ['NOTCHLET_TOKEN', 'NOTCHLET_EMAIL', 'NOTCHLET_PASSWORD', 'NOTCHLET_SERVER']) delete env[name];
     const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, cli, 'init', '--interactive'], { cwd: root, env, encoding: 'utf8', timeout: 15_000 });
     assert.equal(result.status, 0, `${result.error ?? ''}\n${result.stdout}\n${result.stderr}`);
@@ -514,6 +551,20 @@ globalThis.fetch = async (input, init) => {
     assert.equal(workspace.binding.repositoryId, 7);
     assert.equal(workspace.preferences.syncMode, 'manual');
     assert.match(result.stderr, /Organizations:[\s\S]*Products:[\s\S]*Repositories:/);
+    assert.match(result.stdout, /https:\/\/interactive\.invalid/);
+    assert.match(result.stdout, /Product ID.*31/);
+    assert.match(result.stdout, /Repository ID.*7/);
+    assert.match(result.stdout, /github\.com\/example\/repo/);
+    assert.match(result.stdout, /Agent skills.*OpenCode/);
+    assert.match(result.stdout, /MCP access.*configured for OpenCode/);
+    assert.match(result.stderr, /documents:write, tickets:write, generation:run, issues:sync/);
+    assert.match(result.stderr, /MCP credential scopes:/);
+    const opencodeConfig = await readFile(path.join(root, 'opencode.json'), 'utf8');
+    assert.match(opencodeConfig, /"type": "local"/);
+    assert.match(opencodeConfig, /"serve",\s*"--server",\s*"https:\/\/interactive\.invalid"/);
+    const mcpState = await readFile(path.join(root, '.notchlet', '.local', 'mcp.json'), 'utf8');
+    assert.match(mcpState, /"credential"/);
+    assert.doesNotMatch(opencodeConfig + mcpState + result.stdout + result.stderr, /mcp_live_fixture_secret/);
     assert.doesNotMatch(result.stdout + result.stderr + await readFile(path.join(config, 'profiles.json'), 'utf8'), /fixture-password|fixture-access|fixture-refresh/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

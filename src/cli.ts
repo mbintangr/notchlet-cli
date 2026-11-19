@@ -3,7 +3,7 @@ import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { appendEvidence, CORE_VERSION, closeChange, evaluateState, findWorkspace, initWorkspace, instructions, listChanges, persistConversion, previewCapabilityClose, readChange, readiness, scaffold, transitionTask, WorkflowError, type EvidenceWriteInput, type TaskStatus, type WorkflowAction, type CliJsonEnvelope } from '@notchlet/core';
 import { section, kv, bullet, ok, err, warn, table, box, divider } from './cli-format.js';
-import { isTty, prompt, secret, confirm, requiredString, requiredNumber } from './cli-prompt.js';
+import { isTty, prompt, secret, confirm, requiredString } from './cli-prompt.js';
 
 const args = process.argv.slice(2);
 const profiling = process.env.NOTCHLET_PROFILE === '1';
@@ -24,7 +24,7 @@ async function profileAsync<T>(name: string, operation: () => Promise<T>): Promi
 const json = args.includes('--json');
 const positional: string[] = [];
 for (let i = 0; i < args.length; i++) {
-  if (['--workspace', '--root', '--schema', '--action', '--server', '--product-id', '--repository-id', '--endpoint', '--item-id', '--change', '--name', '--snapshot-revision', '--summary', '--backlog-status', '--baseline-revision', '--revision', '--file'].includes(args[i])) { i++; continue; }
+  if (['--workspace', '--root', '--schema', '--action', '--server', '--client', '--credential-id', '--product-id', '--product', '--repository-id', '--repository', '--endpoint', '--item-id', '--change', '--name', '--snapshot-revision', '--summary', '--backlog-status', '--baseline-revision', '--revision', '--file'].includes(args[i])) { i++; continue; }
   if (!args[i].startsWith('--')) positional.push(args[i]);
 }
 const rootOption = args.find(arg => arg.startsWith('--workspace=') || arg.startsWith('--root='));
@@ -33,6 +33,35 @@ const workspace = () => findWorkspace(process.cwd(), explicitRoot);
 const DEFAULT_SERVER = 'https://pg-api.mbintangr.com';
 const optionValue = (name: string): string | undefined => { const eq = args.find(arg => arg.startsWith(`${name}=`)); return eq ? eq.slice(name.length + 1) : args.includes(name) ? args[args.indexOf(name) + 1] : undefined; };
 const serverOption = (): string => optionValue('--server') ?? DEFAULT_SERVER;
+async function pickNamedValue<T>(input: string | undefined, items: T[], options: { kind: string; promptText: string; label: (item: T) => string; keys: (item: T) => string[] }): Promise<T | undefined> {
+  const query = input?.trim().toLocaleLowerCase();
+  let matches = items;
+  if (query) {
+    const exact = items.filter(item => options.keys(item).some(key => key.toLocaleLowerCase() === query));
+    matches = exact.length ? exact : items.filter(item => options.keys(item).some(key => key.toLocaleLowerCase().includes(query)));
+    if (!matches.length) {
+      if (!isTty()) return undefined;
+      matches = items;
+    }
+    if (matches.length === 1) return matches[0];
+  } else if (!isTty()) return undefined;
+  if (!isTty()) throw new Error(`${options.kind} name is ambiguous: ${matches.slice(0, 10).map(options.label).join('; ')}. Use a more specific name or ID.`);
+  const choices = matches.slice(0, 20);
+  process.stderr.write(`${options.kind} choices:\n${choices.map((item, index) => `  ${index + 1}) ${options.label(item)}`).join('\n')}\n`);
+  while (true) {
+    const answer = await prompt(`${options.promptText} (1-${choices.length}): `);
+    const index = Number(answer) - 1;
+    if (Number.isInteger(index) && index >= 0 && index < choices.length) return choices[index];
+    process.stderr.write(`Enter a number from 1 to ${choices.length}.\n`);
+  }
+}
+async function resolveChangeRef(root: string, input: string): Promise<string> {
+  const selected = await pickNamedValue(input, await listChanges(root), {
+    kind: 'Change', promptText: 'Select change', label: item => `${item.name} (${item.id})`, keys: item => [item.id, item.name],
+  });
+  if (!selected) throw new Error(`No change matched "${input}". Use a change name or ID from \`notchlet change list\`.`);
+  return selected.id;
+}
 const command = args.includes('--version') ? 'version' : positional[0] ?? 'help';
 const envelope = (ok: boolean, data: unknown = null, error: CliJsonEnvelope['error'] = null, warnings: unknown[] = []): CliJsonEnvelope => ({ protocolVersion: 1, command, ok, data, error, warnings });
 function print(data: unknown, human?: string): void { console.log(json ? JSON.stringify(envelope(true, data)) : human ?? JSON.stringify(data, null, 2)); }
@@ -60,32 +89,38 @@ ${section('Auth')}
   profile use --server <url>                                Select the current server profile
 
 ${section('Workspace')}
-  workspace bind --server <url> --product-id <id> --repository-id <id> [--rebind]   Bind checkout to a product/repository
+  workspace bind --server <url> [--product <name>] [--repository <name>] [--rebind]   Bind checkout to a product/repository
   workspace info                                                        Show workspace binding and config
   doctor                                                                Diagnose workspace, binding, and server connectivity
 
 ${section('Sync')}
   sync mode auto|manual                                     Set automatic sync preference
-  sync status|push|pull|resolve --change <id> [--yes] [--keep-local]   Sync a change with the remote
+  sync status|push|pull|resolve --change <name|id> [--yes] [--keep-local]   Sync a change with the remote
 
 ${section('Changes')}
   change new <name> [--quick]                               Create a new change
   change list                                               List all changes
-  change show <id>                                          Show change details and readiness
-  change convert <id> --schema quick|standard               Convert a change schema
-  change   close <id> --preview | --baseline-revision <n> [--yes]   Close and archive a change
+  change show <name|id>                                     Show change details and readiness
+  change convert <name|id> --schema quick|standard           Convert a change schema
+  change close <name|id> --preview | --baseline-revision <n> [--yes]   Close and archive a change
 
 ${section('Tasks')}
-  task start <task-id> --change <id> --revision <n>         Start a task
-  task complete <task-id> --change <id> --revision <n>      Complete a task
-  task update <change> <task> <status> <revision>           Update a task status
+  task start <task-name|id> --change <name|id> --revision <n>  Start a task
+  task complete <task-name|id> --change <name|id> --revision <n> Complete a task
+  task update <change-name|id> <task-name|id> <status> <revision> Update a task status
 
 ${section('Other')}
-  backlog import <item-id> --product-id <id>                Import a backlog item as a change
-  checkpoint --change <id> --name <name> [--summary <text>] [--backlog-status TODO|IN_PROGRESS|IN_REVIEW|DONE]   Create a remote checkpoint
-  evidence record --change <id> --file <json-path>          Record evidence for a change
-  instructions <change> [--action plan|revise|implement|verify|resume]   Get workflow instructions for a change
+  backlog import <item-key|title|id> [--product-id <id>]     Import a backlog item as a change
+  checkpoint --change <name|id> --name <name> [--summary <text>] [--backlog-status TODO|IN_PROGRESS|IN_REVIEW|DONE]   Create a remote checkpoint
+  evidence record --change <name|id> --file <json-path>     Record evidence for a change
+  instructions <change-name|id> [--action plan|revise|implement|verify|resume] Get workflow instructions for a change
   client init|update opencode|claude [--apply]              Install client guidance (skills)
+
+${section('MCP')}
+  mcp serve --server <url> [--client opencode|claude]       Run the local stdio MCP bridge
+  mcp status [--server <url>] [--client opencode|claude]    Show MCP setup, credential, and config state
+  mcp disconnect [--client opencode|claude] [--revoke] [--yes]   Remove this project's MCP entry
+  mcp revoke [--server <url>] [--credential-id <id>] [--yes]     Revoke the stored MCP credential
 
 ${section('Global options')}
   --json           Machine-readable JSON output
@@ -234,14 +269,16 @@ Options:
     }
     else if (command === 'workspace' && ['bind', 'rebind'].includes(positional[1] ?? '')) {
       if (args.includes('--help') || args.includes('-h')) {
-        showCommandHelp('workspace bind', `notchlet workspace bind --server <url> --product-id <id> --repository-id <id> [--rebind]
+        showCommandHelp('workspace bind', `notchlet workspace bind --server <url> [--product <name|id>] [--repository <name|owner/repo|id>] [--rebind]
 
   Bind a Git checkout to a Notchlet product and repository.
 
 Options:
   --server <url>             Notchlet server (default: ${DEFAULT_SERVER})
-  --product-id <id>          Product ID (numeric)
-  --repository-id <id>       Repository ID (numeric)
+  --product <name|id>        Product name or ID (defaults to an interactive picker)
+  --repository <name|owner/repo|id>  Repository name or ID (defaults to an interactive picker)
+  --product-id <id>          Product ID (numeric, retained for scripts)
+  --repository-id <id>       Repository ID (numeric, retained for scripts)
   --rebind                   Confirm rebinding if the workspace is already bound
   --endpoint <url>           Override MCP endpoint
   --allow-file-token-store   Allow restricted file credential storage
@@ -249,11 +286,40 @@ Options:
       }
       const root = await requireWorkspace('workspace bind');
       const server = await requiredString(serverOption(), `Notchlet server HTTPS origin [${DEFAULT_SERVER}]: `) ?? DEFAULT_SERVER;
-      const productId = await requiredNumber(optionValue('--product-id'), 'Product ID: ');
-      const repositoryId = await requiredNumber(optionValue('--repository-id'), 'Repository ID: ');
-      if (!Number.isSafeInteger(productId) || !Number.isSafeInteger(repositoryId)) fail('usage_error', usage, 'Provide numeric --product-id and --repository-id.', 64);
+      const productQuery = optionValue('--product') ?? optionValue('--product-id');
+      const repositoryQuery = optionValue('--repository') ?? optionValue('--repository-id');
+      let product: any;
+      let repository: any;
+      if (/^\d+$/.test(productQuery ?? '') && /^\d+$/.test(repositoryQuery ?? '')) {
+        product = { id: Number(productQuery) };
+        repository = { id: Number(repositoryQuery) };
+      } else {
+        const { platformApi } = await import('./integration.js');
+        const api = await platformApi(server, { allowFileStore: args.includes('--allow-file-token-store') });
+        const organizations = await api.get('/organizations/mine') as Array<{ id: number; name: string }>;
+        const allProducts: any[] = [];
+        for (const organization of organizations) {
+          const products = await api.get(`/products?organizationId=${organization.id}`) as any[];
+          allProducts.push(...products.map(item => ({ ...item, organizationName: organization.name })));
+        }
+        product = await pickNamedValue(productQuery, allProducts, {
+          kind: 'Product', promptText: 'Select product',
+          label: item => `${item.name} · ${item.organizationName} (#${item.id})`,
+          keys: item => [item.name, item.organizationName, `${item.name} ${item.organizationName}`, String(item.id)],
+        });
+        if (!product) fail('product_not_found', `No product matched ${productQuery ? `"${productQuery}"` : 'the selection'}.`, 'Choose a product available to this account or provide --product-id.', 2);
+        const repositories = await api.get(`/git/config?productId=${product.id}`);
+        const repositoryList = Array.isArray(repositories) ? repositories : repositories ? [repositories] : [];
+        repository = await pickNamedValue(repositoryQuery, repositoryList, {
+          kind: 'Repository', promptText: 'Select repository',
+          label: item => `${item.repoLabel ?? `${item.repoOwner ?? ''}/${item.repoName ?? ''}`} · ${item.provider ?? 'Git'} (#${item.id})`,
+          keys: item => [item.repoLabel, `${item.repoOwner ?? ''}/${item.repoName ?? ''}`, item.repoName, String(item.id)].filter(Boolean),
+        });
+        if (!repository) fail('repository_not_found', `No repository matched ${repositoryQuery ? `"${repositoryQuery}"` : 'the selection'}.`, 'Choose a repository connected to this product or provide --repository-id.', 2);
+      }
+      if (!Number.isSafeInteger(Number(product.id)) || !Number.isSafeInteger(Number(repository.id))) fail('usage_error', usage, 'Provide a product and repository available to your account.', 64);
       const { bindWorkspace } = await import('./integration.js');
-      const result = await bindWorkspace(root, { server, productId: productId!, repositoryId: repositoryId!, endpoint: optionValue('--endpoint'), rebind: positional[1] === 'rebind' || args.includes('--rebind') });
+      const result = await bindWorkspace(root, { server, productId: Number(product.id), repositoryId: Number(repository.id), endpoint: optionValue('--endpoint'), rebind: positional[1] === 'rebind' || args.includes('--rebind'), allowFileStore: args.includes('--allow-file-token-store') });
       if (json) { print(result); }
       else {
         const b = (result as any).binding;
@@ -369,7 +435,7 @@ Options:
     }
     else if (command === 'sync') {
       if (args.includes('--help') || args.includes('-h')) {
-        showCommandHelp('sync', `notchlet sync <action> --change <id> [--yes] [--keep-local]
+        showCommandHelp('sync', `notchlet sync <action> --change <name|id> [--yes] [--keep-local]
 
   status   Show sync state of a change
   push     Push local change to remote
@@ -377,7 +443,7 @@ Options:
   resolve  Resolve a conflict (requires --keep-local)
 
 Options:
-  --change <id>        Change ID (required)
+  --change <name|id>   Change name or ID (required)
   --yes                Skip confirmation prompt
   --keep-local         Keep local changes when resolving (required for resolve)
   --server <url>       Notchlet server (default: ${DEFAULT_SERVER})
@@ -387,8 +453,9 @@ Options:
       }
       const root = await requireWorkspace('sync');
       const action = positional[1];
-      const id = optionValue('--change') ?? (isTty() ? await prompt('Change ID: ') : undefined);
-      if (!['status', 'push', 'pull', 'resolve'].includes(action ?? '') || !id) fail('usage_error', usage, 'Use `notchlet sync <status|push|pull|resolve> --change <id> [--yes] [--keep-local]`.', 64);
+      let id = optionValue('--change') ?? (isTty() ? await prompt('Change name or ID: ') : undefined);
+      if (!['status', 'push', 'pull', 'resolve'].includes(action ?? '') || !id) fail('usage_error', usage, 'Use `notchlet sync <status|push|pull|resolve> --change <name|id> [--yes] [--keep-local]`.', 64);
+      id = await resolveChangeRef(root, id);
       const { syncStatus, syncPush, syncPull, syncResolve } = await import('./integration.js');
       const syncOptions = { server: optionValue('--server'), endpoint: optionValue('--endpoint'), yes: args.includes('--yes') };
       if (action === 'status') {
@@ -469,12 +536,12 @@ Options:
     }
     else if (command === 'checkpoint') {
       if (args.includes('--help') || args.includes('-h')) {
-        showCommandHelp('checkpoint', `notchlet checkpoint --change <id> --name <name> [--summary <text>] [--backlog-status TODO|IN_PROGRESS|IN_REVIEW|DONE]
+        showCommandHelp('checkpoint', `notchlet checkpoint --change <name|id> --name <name> [--summary <text>] [--backlog-status TODO|IN_PROGRESS|IN_REVIEW|DONE]
 
   Create a remote checkpoint on a synchronized change.
 
 Options:
-  --change <id>              Change ID (required)
+  --change <name|id>         Change name or ID (required)
   --name <name>              Checkpoint name (required, max 100 chars)
   --summary <text>           Checkpoint summary (max 4096 chars)
   --backlog-status <status>  Backlog status: TODO, IN_PROGRESS, IN_REVIEW, or DONE
@@ -484,10 +551,11 @@ Options:
   --json                     Machine-readable JSON output`);
       }
       const root = await requireWorkspace('checkpoint');
-      const id = optionValue('--change') ?? (isTty() ? await prompt('Change ID: ') : undefined);
-      const name = optionValue('--name') ?? (isTty() && !id ? await prompt('Checkpoint name: ') : undefined);
+      const changeRef = optionValue('--change') ?? (isTty() ? await prompt('Change name or ID: ') : undefined);
+      const name = optionValue('--name') ?? (isTty() && !changeRef ? await prompt('Checkpoint name: ') : undefined);
       const backlogStatus = optionValue('--backlog-status');
-      if (!id || !name || (backlogStatus !== undefined && !['TODO', 'IN_PROGRESS', 'IN_REVIEW', 'DONE'].includes(backlogStatus))) fail('usage_error', usage, 'Provide --change, --name, and an optional supported --backlog-status.', 64);
+      if (!changeRef || !name || (backlogStatus !== undefined && !['TODO', 'IN_PROGRESS', 'IN_REVIEW', 'DONE'].includes(backlogStatus))) fail('usage_error', usage, 'Provide --change, --name, and an optional supported --backlog-status.', 64);
+      const id = await resolveChangeRef(root, changeRef);
       const { syncCheckpoint } = await import('./integration.js');
       const result = await syncCheckpoint(root, id, { name, ...(optionValue('--summary') === undefined ? {} : { summary: optionValue('--summary') }), ...(backlogStatus === undefined ? {} : { backlogStatus: backlogStatus as 'TODO' | 'IN_PROGRESS' | 'IN_REVIEW' | 'DONE' }) }, { server: optionValue('--server'), endpoint: optionValue('--endpoint') });
       if (json) { print(result); }
@@ -506,20 +574,21 @@ Options:
     }
     else if (command === 'evidence' && positional[1] === 'record') {
       if (args.includes('--help') || args.includes('-h')) {
-        showCommandHelp('evidence record', `notchlet evidence record --change <id> --file <json-path>
+        showCommandHelp('evidence record', `notchlet evidence record --change <name|id> --file <json-path>
 
   Record evidence for a change.
 
 Options:
-  --change <id>    Change ID (required)
+  --change <name|id>  Change name or ID (required)
   --file <path>    Path to evidence JSON file (required, max 32 KiB)
   --workspace <root>   Set workspace root
   --json               Machine-readable JSON output`);
       }
       const root = await requireWorkspace('evidence record');
-      const id = optionValue('--change') ?? (isTty() ? await prompt('Change ID: ') : undefined);
-      const file = optionValue('--file') ?? (isTty() && !id ? await prompt('Evidence JSON file path: ') : undefined);
-      if (!id || !file) fail('usage_error', usage, 'Provide --change and --file for evidence record.', 64);
+      const changeRef = optionValue('--change') ?? (isTty() ? await prompt('Change name or ID: ') : undefined);
+      const file = optionValue('--file') ?? (isTty() && !changeRef ? await prompt('Evidence JSON file path: ') : undefined);
+      if (!changeRef || !file) fail('usage_error', usage, 'Provide --change and --file for evidence record.', 64);
+      const id = await resolveChangeRef(root, changeRef);
       const source = await readFile(path.resolve(process.cwd(), file), 'utf8');
       if (Buffer.byteLength(source, 'utf8') > EVIDENCE_INPUT_LIMIT_BYTES) fail('payload_too_large', 'Evidence input exceeds 32 KiB.', 'Split the evidence into smaller records and try again.', 5);
       let value: unknown;
@@ -529,13 +598,13 @@ Options:
     }
     else if (command === 'backlog' && positional[1] === 'import') {
       if (args.includes('--help') || args.includes('-h')) {
-        showCommandHelp('backlog import', `notchlet backlog import <item-id> --product-id <id>
+        showCommandHelp('backlog import', `notchlet backlog import <item-key|title|id> [--product-id <id>]
 
   Import a backlog item as a change.
 
 Options:
-  <item-id>          Backlog item ID (numeric, required)
-  --product-id <id>  Product ID (numeric, required)
+  <item-key|title|id>  Backlog key, title, or numeric ID
+  --product-id <id>    Product ID (defaults to the workspace binding)
   --server <url>     Notchlet server (default: ${DEFAULT_SERVER})
   --endpoint <url>   Override MCP endpoint
   --allow-file-token-store   Allow restricted file credential storage
@@ -543,12 +612,153 @@ Options:
   --json               Machine-readable JSON output`);
       }
       const root = await requireWorkspace('backlog import');
-      const itemId = await requiredNumber(positional[2], 'Backlog item ID: ');
-      const productId = await requiredNumber(optionValue('--product-id'), 'Product ID: ');
-      if (!Number.isSafeInteger(itemId) || !Number.isSafeInteger(productId)) fail('usage_error', usage, 'Provide numeric item ID and --product-id.', 64);
+      const itemQuery = positional[2] ?? (isTty() ? await prompt('Backlog item key or title: ') : undefined);
+      if (!itemQuery) fail('usage_error', usage, 'Provide a backlog key/title/ID, for example `APP-42` or `Improve onboarding`.', 64);
+      let productId = Number(optionValue('--product-id'));
+      if (!Number.isSafeInteger(productId) || productId < 1) {
+        try { productId = Number(JSON.parse(await readFile(path.join(root, '.notchlet', 'workspace.json'), 'utf8')).binding?.productId); }
+        catch { productId = NaN; }
+      }
+      if (!Number.isSafeInteger(productId) || productId < 1) fail('product_required', 'No product is selected for this workspace.', 'Run `notchlet init` or `notchlet workspace bind`, or pass --product-id.', 64);
+      let itemId = Number(itemQuery);
+      if (!Number.isSafeInteger(itemId) || itemId < 1) {
+        const { platformApi } = await import('./integration.js');
+        const api = await platformApi(optionValue('--server'), { allowFileStore: args.includes('--allow-file-token-store') });
+        const items = await api.get(`/backlog?productId=${productId}`) as any[];
+        const selected = await pickNamedValue(itemQuery, items, {
+          kind: 'Backlog item', promptText: 'Select backlog item',
+          label: item => `${item.key ? `${item.key} · ` : ''}${item.title} · ${item.status ?? item.itemType ?? 'item'} (#${item.id})`,
+          keys: item => [item.key, item.title, String(item.id)].filter(Boolean),
+        });
+        if (!selected) fail('backlog_item_not_found', `No backlog item matched "${itemQuery}" in product ${productId}.`, 'Check the item key/title or select the correct product with --product-id.', 2);
+        itemId = Number(selected.id);
+      }
+      if (!Number.isSafeInteger(itemId) || itemId < 1) fail('usage_error', usage, 'Provide a valid backlog key, title, or numeric ID.', 64);
       const { importBacklogItem } = await import('./integration.js');
-      const change = await importBacklogItem(root, { itemId: itemId!, productId: productId!, server: optionValue('--server'), endpoint: optionValue('--endpoint'), allowFileStore: args.includes('--allow-file-token-store') });
+      const change = await importBacklogItem(root, { itemId, productId, server: optionValue('--server'), endpoint: optionValue('--endpoint'), allowFileStore: args.includes('--allow-file-token-store') });
       printWithSync({ change }, await syncIfAutomatic(root, change.id), `Imported backlog item ${itemId} as change ${change.id}.`);
+    }
+    else if (command === 'mcp') {
+      const action = positional[1];
+      if (args.includes('--help') || args.includes('-h')) {
+        showCommandHelp('mcp', `notchlet mcp <action> [options]
+
+  serve      Run the local stdio MCP bridge for OpenCode/Claude
+  status     Show MCP setup, credential presence, and project config state
+  disconnect Remove this project's Notchlet MCP entry (and optionally revoke)
+  revoke     Revoke the generated MCP credential and delete its local secret
+
+Options:
+  --server <url>         Notchlet server (default: ${DEFAULT_SERVER})
+  --client <name>        opencode or claude
+  --credential-id <id>   Credential to revoke (revoke)
+  --revoke               Also revoke the account credential (disconnect)
+  --yes                  Skip confirmation prompts
+  --workspace <root>     Set workspace root (serve, status, disconnect, revoke)
+  --json                 Machine-readable JSON output (status/disconnect/revoke)
+
+The bridge reads its credential from the OS credential store; secrets are never
+passed on the command line or written to project configuration.`);
+      }
+      const clientOption = optionValue('--client');
+      if (clientOption !== undefined && !['opencode', 'claude'].includes(clientOption)) fail('usage_error', usage, 'Use --client opencode or --client claude.', 64);
+      const client = clientOption as 'opencode' | 'claude' | undefined;
+      if (action === 'serve') {
+        const { serveMcp } = await import('./mcp-bridge.js');
+        const { redactMcpText } = await import('./mcp-bridge.js');
+        try {
+          await serveMcp(serverOption(), { client, workspace: optionValue('--workspace') ?? explicitRoot });
+        } catch (error) {
+          process.stderr.write(`notchlet mcp serve: ${redactMcpText(error instanceof Error ? error.message : String(error))}\n`);
+          process.exitCode = 1;
+        }
+      } else if (action === 'status') {
+        const root = await workspace();
+        const { mcpStatus, mcpClientLabel } = await import('./mcp-onboarding.js');
+        const result = await mcpStatus({ root, server: optionValue('--server'), client });
+        if (json) { print(result); }
+        else {
+          const lines: string[] = [section('MCP status')];
+          lines.push(kv('Workspace', result.root ?? '(none)'));
+          if (!result.servers.length) lines.push(warn('No MCP configuration is recorded for this workspace. Run `notchlet init --interactive` to configure it.'));
+          for (const server of result.servers) {
+            lines.push(divider());
+            lines.push(kv('Server', server.server));
+            if (server.credential) {
+              lines.push(kv('Credential', `${server.credential.name}${server.credential.id ? ` (id ${server.credential.id})` : ''}`));
+              lines.push(kv('Scopes', server.credential.scopes.join(', ') || '(none)'));
+              lines.push(kv('Keyring', server.credential.keyring === 'present' ? ok('present') : server.credential.keyring === 'missing' ? err('missing') : warn('unavailable')));
+            } else {
+              lines.push(kv('Credential', warn('none recorded')));
+            }
+            if (server.account) {
+              const account = server.account.enabled === true ? ok('enabled') : server.account.enabled === false ? warn('disabled') : warn(`unknown${server.account.error ? ` - ${server.account.error}` : ''}`);
+              lines.push(kv('Account MCP', account));
+            }
+            for (const entry of server.clients) {
+              const state = entry.state === 'configured' ? ok('configured') : entry.state === 'modified' ? warn('modified (preserved)') : entry.state === 'invalid' ? err('invalid') : warn('missing');
+              lines.push(kv(mcpClientLabel(entry.client), `${state} - ${entry.path}${entry.reason ? ` (${entry.reason})` : ''}`));
+            }
+          }
+          console.log(box(lines));
+        }
+      } else if (action === 'disconnect') {
+        const root = await requireWorkspace('mcp disconnect');
+        const yes = args.includes('--yes');
+        if (!yes && !isTty()) fail('confirmation_required', 'MCP disconnect changes project configuration and requires confirmation.', 'Pass --yes to confirm in non-interactive mode.', 64);
+        const { mcpDisconnect, mcpClientLabel } = await import('./mcp-onboarding.js');
+        const result = await mcpDisconnect({
+          root,
+          server: optionValue('--server'),
+          client,
+          revoke: args.includes('--revoke'),
+          yes,
+          confirm: (message) => confirm(message),
+          allowFileStore: args.includes('--allow-file-token-store'),
+        });
+        if (json) { print(result); }
+        else {
+          const lines: string[] = [section('MCP disconnect')];
+          if (result.message) lines.push(warn(result.message));
+          for (const entry of result.removed) {
+            const state = entry.action === 'removed' ? ok('removed') : entry.action === 'conflict' ? err('conflict') : warn('not configured');
+            lines.push(kv(mcpClientLabel(entry.client), `${state} - ${entry.path}${entry.reason ? ` (${entry.reason})` : ''}`));
+          }
+          if (result.credential) {
+            lines.push(kv('Credential', `${result.credential.name}${result.credential.id ? ` (id ${result.credential.id})` : ''}`));
+            lines.push(kv('Revoked', result.credential.revoked ? ok('yes') : warn('no')));
+            lines.push(kv('Keyring', result.credential.keyring === 'removed' ? ok('removed') : result.credential.keyring === 'missing' ? warn('missing') : warn('kept')));
+            if (result.credential.message) lines.push(kv('Note', warn(result.credential.message)));
+          }
+          console.log(box(lines));
+        }
+      } else if (action === 'revoke') {
+        const root = await workspace();
+        const yes = args.includes('--yes');
+        if (!yes && !isTty()) fail('confirmation_required', 'MCP credential revocation requires confirmation.', 'Pass --yes to confirm in non-interactive mode.', 64);
+        const { mcpRevoke } = await import('./mcp-onboarding.js');
+        const rawId = optionValue('--credential-id');
+        const credentialId = rawId === undefined ? undefined : Number(rawId);
+        if (credentialId !== undefined && (!Number.isSafeInteger(credentialId) || credentialId < 1)) fail('usage_error', usage, 'Provide a numeric --credential-id.', 64);
+        const result = await mcpRevoke({
+          root,
+          server: optionValue('--server'),
+          credentialId,
+          yes,
+          confirm: (message) => confirm(message),
+          allowFileStore: args.includes('--allow-file-token-store'),
+        });
+        if (json) { print(result); }
+        else {
+          const lines: string[] = [section('MCP credential revoked')];
+          lines.push(kv('Server', result.origin));
+          if (result.credentialName) lines.push(kv('Credential', `${result.credentialName}${result.credentialId ? ` (id ${result.credentialId})` : ''}`));
+          lines.push(kv('Remote revocation', result.revoked ? ok('revoked') : warn('already revoked or not found')));
+          lines.push(kv('Keyring', result.keyring === 'removed' ? ok('removed') : result.keyring === 'missing' ? warn('missing') : warn('kept')));
+          if (result.message) lines.push(kv('Note', warn(result.message)));
+          console.log(box(lines));
+        }
+      } else fail('usage_error', usage, 'Use `notchlet mcp serve|status|disconnect|revoke`.', 64);
     }
     else if (command === 'init') {
       if (args.includes('--help') || args.includes('-h')) {
@@ -578,11 +788,33 @@ Options:
           if (result.organizationId) lines.push(kv('Organization ID', String(result.organizationId)));
           if (result.productId) lines.push(kv('Product ID', String(result.productId)));
           if (result.syncMode) lines.push(kv('Sync mode', result.syncMode));
+          if (result.guidance) {
+            const guidance = result.guidance as { client: string; results: Array<{ applied: boolean; action: string }> };
+            const applied = guidance.results.filter(item => item.applied).length;
+            const conflicts = guidance.results.filter(item => item.action === 'conflict').length;
+            const clientName = guidance.client === 'opencode' ? 'OpenCode' : 'Claude Code';
+            lines.push(kv('Agent skills', `${applied} installed for ${clientName}${conflicts ? `; ${conflicts} conflict(s) preserved` : ''}`));
+          }
+          if (result.mcp) {
+            const mcp = result.mcp;
+            const clientName = mcp.client === 'opencode' ? 'OpenCode' : 'Claude Code';
+            const state = mcp.status === 'configured'
+              ? ok(`configured for ${clientName}${typeof mcp.toolCount === 'number' && mcp.toolCount > 0 ? ` (${mcp.toolCount} tools verified)` : ''}`)
+              : mcp.status === 'configured-unverified'
+                ? warn(`written for ${clientName}; live verification failed${mcp.message ? ` - ${mcp.message}` : ''}`)
+                : mcp.status === 'conflict'
+                  ? err(`conflict for ${clientName}${mcp.message ? ` - ${mcp.message}` : ''}`)
+                  : warn(`skipped for ${clientName}${mcp.message ? ` - ${mcp.message}` : ''}`);
+            lines.push(kv('MCP access', state));
+          }
           if (result.message) lines.push(kv('Message', result.message));
           if (result.binding) {
             lines.push(divider());
             lines.push(section('Binding'));
-            const b = result.binding as any;
+            // interactiveInit wraps bindWorkspace's result, which itself wraps
+            // the persisted binding together with rebound/alreadyBound metadata.
+            const bindingResult = result.binding as any;
+            const b = bindingResult.binding ?? bindingResult;
             lines.push(kv('Server', b.server));
             lines.push(kv('Product ID', String(b.productId)));
             lines.push(kv('Repository ID', String(b.repositoryId)));
@@ -599,9 +831,9 @@ Options:
 
   new <name> [--quick]           Create a new change
   list                           List all changes
-  show <id>                      Show change details and readiness
-  convert <id> --schema <q|s>    Convert a change schema
-  close <id> --preview | --baseline-revision <n>   Close and archive a change
+  show <name|id>                 Show change details and readiness
+  convert <name|id> --schema <q|s> Convert a change schema
+  close <name|id> --preview | --baseline-revision <n>   Close and archive a change
 
 Options:
   --quick                  Create a quick (minimal) change
@@ -635,8 +867,9 @@ Options:
         }
       } else if (action === 'show') {
         const root = await requireWorkspace('change show');
-        const id = positional[2] ?? (isTty() ? await prompt('Change ID: ') : undefined);
-        if (!id) fail('usage_error', usage, 'Provide a change ID from `notchlet change list`.', 64);
+        const changeRef = positional[2] ?? (isTty() ? await prompt('Change name or ID: ') : undefined);
+        const id = changeRef ? await resolveChangeRef(root, changeRef) : undefined;
+        if (!id) fail('usage_error', usage, 'Provide a change name or ID from `notchlet change list`.', 64);
         const change = await readChange(root, id);
         const result = { change, readiness: readiness(change, await artifactContents(root, id, change)) };
         if (json) { printWithSync(result, await syncIfAutomatic(root, id)); }
@@ -669,16 +902,18 @@ Options:
         }
       } else if (action === 'convert') {
         const root = await requireWorkspace('change convert');
-        const id = positional[2] ?? (isTty() ? await prompt('Change ID: ') : undefined);
-        const schema = optionValue('--schema') ?? (isTty() && !id ? await prompt('Schema (quick|standard): ') : undefined);
-        if (!id || (schema !== 'quick' && schema !== 'standard')) fail('usage_error', usage, 'Use `--schema quick` or `--schema standard`.', 64);
+        const changeRef = positional[2] ?? (isTty() ? await prompt('Change name or ID: ') : undefined);
+        const schema = optionValue('--schema') ?? (isTty() && !changeRef ? await prompt('Schema (quick|standard): ') : undefined);
+        if (!changeRef || (schema !== 'quick' && schema !== 'standard')) fail('usage_error', usage, 'Use `--schema quick` or `--schema standard`.', 64);
+        const id = await resolveChangeRef(root, changeRef);
         const change = await persistConversion(root, id, schema);
         const result = { change, readiness: readiness(change, await artifactContents(root, id, change)) };
         printWithSync(result, await syncIfAutomatic(root, id), `Converted change ${id} to ${schema} schema.`);
       } else if (action === 'close') {
         const root = await requireWorkspace('change close');
-        const id = positional[2] ?? (isTty() ? await prompt('Change ID: ') : undefined);
-        if (!id) fail('usage_error', usage, 'Provide a change ID.', 64);
+        const changeRef = positional[2] ?? (isTty() ? await prompt('Change name or ID: ') : undefined);
+        if (!changeRef) fail('usage_error', usage, 'Provide a change name or ID.', 64);
+        const id = await resolveChangeRef(root, changeRef);
         if (args.includes('--preview')) {
           const preview = await previewCapabilityClose(root, id);
           if (json) { print(preview); }
@@ -712,12 +947,12 @@ Options:
       if (args.includes('--help') || args.includes('-h')) {
         showCommandHelp('task', `notchlet task <action> [options]
 
-  start <task-id> --change <id> --revision <n>    Start a task
-  complete <task-id> --change <id> --revision <n> Complete a task
-  update <change> <task> <status> <revision>      Update a task status
+  start <task-name|id> --change <name|id> --revision <n>    Start a task
+  complete <task-name|id> --change <name|id> --revision <n> Complete a task
+  update <change-name|id> <task-name|id> <status> <revision> Update a task status
 
 Options:
-  --change <id>     Change ID (required for start/complete)
+  --change <name|id>  Change name or ID (required for start/complete)
   --revision <n>    Revision number (required)
   --workspace <root>   Set workspace root
   --json               Machine-readable JSON output`);
@@ -726,29 +961,44 @@ Options:
       const action = positional[1];
       let id: string | undefined, taskId: string | undefined, status: string | undefined, revisionText: string | undefined;
       if (action === 'start' || action === 'complete') {
-        taskId = positional[2] ?? (isTty() ? await prompt('Task ID: ') : undefined);
-        id = optionValue('--change') ?? (isTty() && !taskId ? await prompt('Change ID: ') : undefined);
+        taskId = positional[2] ?? (isTty() ? await prompt('Task name or ID: ') : undefined);
+        id = optionValue('--change') ?? (isTty() ? await prompt('Change name or ID: ') : undefined);
         status = action === 'start' ? 'in_progress' : 'completed';
         revisionText = optionValue('--revision') ?? (isTty() ? await prompt('Revision: ') : undefined);
       } else if (action === 'update') {
         [, , id, taskId, status, revisionText] = positional;
-        id = id ?? (isTty() ? await prompt('Change ID: ') : undefined);
-        taskId = taskId ?? (isTty() ? await prompt('Task ID: ') : undefined);
+        id = id ?? (isTty() ? await prompt('Change name or ID: ') : undefined);
+        taskId = taskId ?? (isTty() ? await prompt('Task name or ID: ') : undefined);
         status = status ?? (isTty() ? await prompt('Status (pending|in_progress|completed): ') : undefined);
         revisionText = revisionText ?? (isTty() ? await prompt('Revision: ') : undefined);
       }
-      if (!id || !taskId || !['pending', 'in_progress', 'completed'].includes(status ?? '') || !revisionText || !Number.isInteger(Number(revisionText))) fail('usage_error', usage, 'Use task start|complete <task-id> --change <id> --revision <n>, or task update <change> <task> <status> <revision>.', 64);
+      if (!id || !taskId || !['pending', 'in_progress', 'completed'].includes(status ?? '') || !revisionText || !Number.isInteger(Number(revisionText))) fail('usage_error', usage, 'Use task start|complete <task-name|id> --change <change-name|id> --revision <n>, or task update <change-name|id> <task-name|id> <status> <revision>.', 64);
+      const changeMatches = await listChanges(root);
+      const selectedChange = await pickNamedValue(id, changeMatches, {
+        kind: 'Change', promptText: 'Select change',
+        label: item => `${item.name} (${item.id})`, keys: item => [item.id, item.name],
+      });
+      if (!selectedChange) fail('change_not_found', `No change matched "${id}".`, 'Run `notchlet change list` and use a change name or ID.', 2);
+      id = selectedChange.id;
+      const localChange = await readChange(root, id);
+      const selectedTask = await pickNamedValue(taskId, localChange.tasks, {
+        kind: 'Task', promptText: 'Select task',
+        label: item => `${item.title} (${item.id}) · ${item.status}`,
+        keys: item => [item.id, item.title],
+      });
+      if (!selectedTask) fail('task_not_found', `No task matched "${taskId}" in change "${localChange.name}".`, 'Use a task name or ID from `notchlet change show`.', 2);
+      taskId = selectedTask.id;
       const change = await transitionTask(path.join(root, '.notchlet', 'changes', id, 'tasks.json'), taskId, status as TaskStatus, Number(revisionText));
       printWithSync(change, await syncIfAutomatic(root, id), `Task ${taskId} marked ${status} in change ${id}.`);
     } else if (['status', 'validate', 'instructions'].includes(command)) {
       if (args.includes('--help') || args.includes('-h')) {
         const helpText = command === 'status'
-          ? `notchlet status [change]
+          ? `notchlet status [change-name|id]
 
   Show workspace status, or status of a specific change.
 
 Options:
-  [change]     Change ID (optional; lists all changes if omitted)
+  [change-name|id]  Change name or ID (optional; lists all changes if omitted)
   --workspace <root>   Set workspace root
   --json               Machine-readable JSON output`
           : command === 'validate'
@@ -757,15 +1007,15 @@ Options:
   Validate that a change is ready.
 
 Options:
-  <change>     Change ID (required)
+  <change>     Change name or ID (required)
   --workspace <root>   Set workspace root
   --json               Machine-readable JSON output`
-          : `notchlet instructions <change> [--action <action>]
+          : `notchlet instructions <change-name|id> [--action <action>]
 
   Get workflow instructions for a change.
 
 Options:
-  <change>     Change ID (required)
+  <change>     Change name or ID (required)
   --action plan|revise|implement|verify|resume   Action to get instructions for (default: resume)
   --workspace <root>   Set workspace root
   --json               Machine-readable JSON output`;
@@ -776,9 +1026,9 @@ Options:
         if (command === 'validate') fail('setup_required', 'No initialized Notchlet workspace was found.', 'Run `notchlet init` in the project root.', 2);
         print({ coreVersion: CORE_VERSION, workspace: null, changes: [] }, `No Notchlet workspace found. Core engine ${CORE_VERSION}.`);
       } else {
-        const id = positional[1] ?? (isTty() ? await prompt('Change ID: ') : undefined);
-        if (!id) {
-          if (command !== 'status') fail('usage_error', usage, `Provide a change ID for ${command}.`, 64);
+        const changeRef = positional[1] ?? (isTty() ? await prompt('Change name or ID: ') : undefined);
+        if (!changeRef) {
+          if (command !== 'status') fail('usage_error', usage, `Provide a change name or ID for ${command}.`, 64);
           const changes = await listChanges(root);
           if (json) { print({ protocolVersion: 1, coreVersion: CORE_VERSION, workspace: root, changes }); }
           else {
@@ -791,7 +1041,8 @@ Options:
           }
         }
         else {
-          if (positional.length !== 2 && !(isTty() && positional.length === 1)) fail('usage_error', usage, 'Provide exactly one change ID.', 64);
+          if (positional.length !== 2 && !(isTty() && positional.length === 1)) fail('usage_error', usage, 'Provide exactly one change name or ID.', 64);
+          const id = await resolveChangeRef(root, changeRef);
           const change = await profileAsync('changeReadAndParse', () => readChange(root, id));
           const automaticSync = await profileAsync('automaticSyncModeCheck', () => syncIfAutomatic(root, id));
           const contents = await profileAsync('artifactReads', () => artifactContents(root, id, change));
