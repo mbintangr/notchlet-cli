@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "source": "mbintangr/notchlet-skills",
+  "aliases": {
+    "notchlet-development": {
+      "skills": ["notchlet-super"],
+      "note": "The state router handles whole-cycle requests; use the phase-specific skills below when the request is limited to one phase."
+    },
+    "notchlet-backlog-planning": {
+      "skills": ["notchlet-plan"],
+      "note": "Use the current planning skill."
+    },
+    "notchlet-delivery": {
+      "skills": ["notchlet-deliver"],
+      "note": "Use the current delivery skill."
+    },
+    "notchlet-init": {
+      "skills": ["notchlet-mcp"],
+      "commands": ["notchlet init"],
+      "note": "Local workspace initialization and MCP connection setup are separate actions."
+    },
+    "notchlet-n8n-migration": {
+      "skills": [],
+      "note": "Outside the current core mirror; preserve any installed specialization."
+    }
+  }
+}

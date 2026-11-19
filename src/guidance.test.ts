@@ -1,0 +1,44 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const repositoryRoot = path.resolve(packageRoot, '../..');
+
+test('canonical state-aware notchlet-super generates validated OpenCode and Claude Code guidance', async () => {
+  execFileSync(process.execPath, [path.join(packageRoot, 'scripts', 'generate-guidance.mjs')], { cwd: repositoryRoot, stdio: 'pipe' });
+  const source = await readFile(path.join(packageRoot, 'guidance', 'notchlet-super.md'), 'utf8');
+  const opencode = await readFile(path.join(packageRoot, 'guidance', 'generated', 'opencode', 'notchlet-super', 'SKILL.md'), 'utf8');
+  const claude = await readFile(path.join(packageRoot, 'guidance', 'generated', 'claude-code', 'notchlet-super', 'SKILL.md'), 'utf8');
+  const manifest = JSON.parse(await readFile(path.join(packageRoot, 'guidance', 'generated', 'manifest.json'), 'utf8'));
+  const compatibility = JSON.parse(await readFile(path.join(packageRoot, 'guidance', 'generated', 'compatibility.json'), 'utf8'));
+  assert.equal(opencode, source);
+  assert.equal(claude, source);
+  const hash = createHash('sha256').update(source).digest('hex');
+  assert.equal(manifest.sourceSha256, hash);
+  assert.equal(manifest.targets.length, 2);
+  assert.ok(manifest.targets.every((target: any) => target.sha256 === hash));
+  assert.deepEqual(compatibility.aliases['notchlet-backlog-planning'].skills, ['notchlet-plan']);
+  assert.deepEqual(compatibility.aliases['notchlet-delivery'].skills, ['notchlet-deliver']);
+  assert.deepEqual(compatibility.aliases['notchlet-development'].skills, ['notchlet-super']);
+  assert.equal(compatibility.source, 'mbintangr/notchlet-skills');
+  assert.match(source, /Continue \/ resume/);
+  assert.match(source, /read-only/);
+  assert.match(source, /Explore \/ investigate \(read-only\)[\s\S]*?Do not run `notchlet init`/);
+  assert.match(source, /Plan only \(read-only unless asked to persist\)[\s\S]*?does not require initialization, an epic→story→task hierarchy, or application\/change-artifact writes/);
+  assert.match(source, /--action plan/);
+  assert.match(source, /--action verify/);
+  assert.match(source, /--action resume/);
+  assert.match(source, /notchlet validate <id>/);
+  assert.match(source, /notchlet change list/);
+  assert.match(source, /notchlet task start <task-id> --change <id> --revision <revision>/);
+  assert.match(source, /notchlet task complete <task-id> --change <id> --revision <revision>/);
+  assert.match(source, /notchlet doctor/);
+  assert.match(source, /development_instructions_get/);
+  assert.match(source, /development_delivery_create/);
+  assert.doesNotMatch(source, /notchlet-init|curl\s+[^\n]*\/mcp/i);
+});

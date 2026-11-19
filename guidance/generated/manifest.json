@@ -1,0 +1,18 @@
+{
+  "manifestVersion": 1,
+  "source": "guidance/notchlet-super.md",
+  "sourceVersion": "0.1.0",
+  "sourceSha256": "365ffd35b8eb18cc2535319ddebfc7fc6958e1287532f3d04e8341e0c1e9ef2f",
+  "targets": [
+    {
+      "client": "opencode",
+      "path": "guidance/generated/opencode/notchlet-super/SKILL.md",
+      "sha256": "365ffd35b8eb18cc2535319ddebfc7fc6958e1287532f3d04e8341e0c1e9ef2f"
+    },
+    {
+      "client": "claude-code",
+      "path": "guidance/generated/claude-code/notchlet-super/SKILL.md",
+      "sha256": "365ffd35b8eb18cc2535319ddebfc7fc6958e1287532f3d04e8341e0c1e9ef2f"
+    }
+  ]
+}
