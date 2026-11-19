@@ -65,27 +65,51 @@ if (/notchlet-init|curl\s+[^\n]*\/mcp/i.test(source)) throw new Error('Canonical
 if (!/Explore \/ investigate \(read-only\)[\s\S]*?Do not run `notchlet init`/.test(source)) throw new Error('Explore guidance must explicitly be read-only and avoid initialization.');
 if (!/Plan only \(read-only unless asked to persist\)[\s\S]*?does not require initialization, an epic→story→task hierarchy, or application\/change-artifact writes/.test(source)) throw new Error('Planning guidance must be read-only by default and independent of initialization and backlog hierarchy.');
 
+const clients = ['opencode', 'claude-code'];
 const skillDirs = await readdir(skillsSourceDir);
-let skillCount = 0;
+const skillEntries = [];
 for (const dir of skillDirs) {
   const skillFile = path.join(skillsSourceDir, dir, 'SKILL.md');
   let st;
   try { st = await stat(skillFile); } catch { st = null; }
-  if (st?.isFile()) skillCount++;
+  if (!st || !st.isFile()) continue;
+  const content = await readFile(skillFile, 'utf8');
+  skillEntries.push({ name: dir, content, hash: createHash('sha256').update(content).digest('hex') });
+}
+// Use local guidance/notchlet-super.md as canonical source for notchlet-super skill
+const localSuperSource = await readFile(sourcePath, 'utf8');
+for (const entry of skillEntries) {
+  if (entry.name === 'notchlet-super') {
+    entry.content = localSuperSource;
+    entry.hash = createHash('sha256').update(localSuperSource).digest('hex');
+  }
+}
+
+const targets = [];
+for (const client of clients) {
+  for (const entry of skillEntries) {
+    const target = path.join(packageRoot, 'guidance', 'generated', client, entry.name, 'SKILL.md');
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, entry.content, 'utf8');
+    targets.push({ client, path: path.relative(packageRoot, target).replace(/\\/g, '/'), sha256: entry.hash, skill: entry.name });
+  }
 }
 
 const packageManifest = JSON.parse(await readFile(path.join(packageRoot, 'package.json'), 'utf8'));
+const skillsMap = {};
+for (const e of skillEntries) skillsMap[e.name] = { hash: e.hash, path: `skills/${e.name}/SKILL.md` };
 const manifest = {
   manifestVersion: 1,
   source: 'guidance/notchlet-super.md',
   sourceVersion: packageManifest.version,
   sourceSha256: createHash('sha256').update(source).digest('hex'),
   skillsRepo: skillsRepoRoot,
-  skillCount,
-  skills: skillLock.skills,
-  aliases: aliases.aliases,
+  skillCount: skillEntries.length,
+  skills: skillsMap,
+  targets,
 };
 const manifestDir = path.join(packageRoot, 'guidance', 'generated');
 await mkdir(manifestDir, { recursive: true });
 await writeFile(path.join(manifestDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-console.log(`Validated ${skillCount} skills from ${skillsRepoRoot}. Skills are installed directly from the notchlet-skills repo at runtime.`);
+await writeFile(path.join(manifestDir, 'compatibility.json'), `${JSON.stringify({ skills: skillLock.skills, aliases: aliases.aliases, source: aliases.source }, null, 2)}\n`, 'utf8');
+console.log(`Synced ${targets.length} skill outputs (${skillEntries.length} skills x ${clients.length} clients) from ${skillsRepoRoot} to guidance/generated/.`);

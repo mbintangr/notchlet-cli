@@ -20,8 +20,8 @@ test('canonical state-aware notchlet-super generates validated OpenCode and Clau
   assert.equal(claude, source);
   const hash = createHash('sha256').update(source).digest('hex');
   assert.equal(manifest.sourceSha256, hash);
-  assert.equal(manifest.targets.length, 2);
-  assert.ok(manifest.targets.every((target: any) => target.sha256 === hash));
+  assert.equal(manifest.targets.length, 16);
+  assert.ok(manifest.targets.filter((t: any) => t.skill === 'notchlet-super').every((target: any) => target.sha256 === hash));
   assert.deepEqual(compatibility.aliases['notchlet-backlog-planning'].skills, ['notchlet-plan']);
   assert.deepEqual(compatibility.aliases['notchlet-delivery'].skills, ['notchlet-deliver']);
   assert.deepEqual(compatibility.aliases['notchlet-development'].skills, ['notchlet-super']);

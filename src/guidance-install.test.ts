@@ -30,8 +30,13 @@ test('client guidance install/upgrade previews are idempotent and preserve unman
       const preview = await installClientGuidance(root, client);
       assert.equal(preview.action, 'install');
       assert.equal(preview.applied, false);
+      assert.equal(preview.results.length, 8);
+      assert.equal(preview.results.every(r => r.applied === false), true);
       const applied = await installClientGuidance(root, client, { apply: true });
-      assert.deepEqual(applied, { ...preview, applied: true });
+      assert.equal(applied.action, 'install');
+      assert.equal(applied.applied, true);
+      assert.equal(applied.results.length, 8);
+      assert.equal(applied.results.every(r => r.applied === true), true);
       assert.equal((await installClientGuidance(root, client, { apply: true })).action, 'unchanged');
     }
 
@@ -42,9 +47,9 @@ test('client guidance install/upgrade previews are idempotent and preserve unman
     await writeFile(target, oldGenerated);
     const manifestPath = path.join(root, '.notchlet', '.local', 'client-guidance.json');
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
-    manifest.clients.opencode.installedHash = oldHash;
-    manifest.clients.opencode.sourceHash = oldHash;
-    manifest.clients.opencode.sourceVersion = '0.0.9';
+    manifest.clients.opencode['notchlet-super'].installedHash = oldHash;
+    manifest.clients.opencode['notchlet-super'].sourceHash = oldHash;
+    manifest.clients.opencode['notchlet-super'].sourceVersion = '0.0.9';
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     const upgraded = await installClientGuidance(root, 'opencode', { apply: true });
     assert.equal(upgraded.action, 'update');

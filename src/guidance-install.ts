@@ -5,14 +5,12 @@ import { fileURLToPath } from 'node:url';
 
 export type GuidanceClient = 'opencode' | 'claude';
 type ClientRecord = { target: string; sourceHash: string; installedHash: string; sourceVersion: string };
-type SkillRecord = { skill: string; target: string; sourceHash: string; installedHash: string; sourceVersion: string };
+type SkillRecord = { target: string; sourceHash: string; installedHash: string; sourceVersion: string };
 type InstallOptions = { apply?: boolean };
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const repositoryRoot = path.resolve(packageRoot, '..');
-const skillsRepoRoot = path.resolve(repositoryRoot, 'notchlet-skills');
-const skillsSourceDir = path.join(skillsRepoRoot, 'skills');
+const generatedDir = (client: GuidanceClient) => path.join(packageRoot, 'guidance', 'generated', client === 'claude' ? 'claude-code' : 'opencode');
 const targetFor = (client: GuidanceClient, skill: string) => client === 'opencode'
   ? `.opencode/skills/${skill}/SKILL.md`
   : `.claude/skills/${skill}/SKILL.md`;
@@ -49,39 +47,32 @@ async function atomicWrite(file: string, contents: string) {
   await rename(temporary, file).catch(async error => { await rm(temporary, { force: true }); throw error; });
 }
 
-async function readSkillSource(skill: string): Promise<{ content: string; hash: string }> {
-  const skillFile = path.join(skillsSourceDir, skill, 'SKILL.md');
-  const st = await stat(skillFile).catch(() => null);
-  if (!st?.isFile()) throw new Error(`Skill not found in notchlet-skills repo: ${skill}`);
-  const content = await readFile(skillFile, 'utf8');
-  return { content, hash: hash(content) };
-}
-
 export async function installClientGuidance(rootInput: string, client: GuidanceClient, options: InstallOptions = {}) {
   if (!['opencode', 'claude'].includes(client)) throw new Error('Client must be opencode or claude.');
+  const root = path.resolve(rootInput);
+  const genDir = generatedDir(client);
+  const genStat = await lstatOrNull(genDir);
+  if (!genStat?.isDirectory()) throw new Error(`Generated guidance not found for ${client}; run \`npm run guidance:generate\` first.`);
 
-  const skillDirs = await readdir(skillsSourceDir);
-  const skills: string[] = [];
-  for (const dir of skillDirs) {
-    const st = await stat(path.join(skillsSourceDir, dir, 'SKILL.md')).catch(() => null);
-    if (st?.isFile()) skills.push(dir);
-  }
-
+  const skillNames = await readdir(genDir);
   const manifestRelative = path.join('.notchlet', '.local', 'client-guidance.json');
-  await assertSafeParents(rootInput, manifestRelative);
-  const manifestPath = path.join(rootInput, manifestRelative);
+  await assertSafeParents(root, manifestRelative);
+  const manifestPath = path.join(root, manifestRelative);
   const manifest = await readManifest(manifestPath);
-  const clientSkills = manifest.clients[client] ?? {};
-  const skillsInstalled = manifest.skills ?? {};
+  const skillsInstalled = manifest.clients[client] ?? {};
 
   const results: Array<{ skill: string; target: string; action: 'install' | 'update' | 'unchanged' | 'conflict'; applied: boolean; reason?: string }> = [];
 
-  for (const skill of skills) {
-    const { content: source, hash: sourceHash } = await readSkillSource(skill);
+  for (const skill of skillNames) {
+    const sourceFile = path.join(genDir, skill, 'SKILL.md');
+    const sourceStat = await lstatOrNull(sourceFile);
+    if (!sourceStat?.isFile()) continue;
+    const source = await readFile(sourceFile, 'utf8');
+    const sourceHash = hash(source);
     const target = targetFor(client, skill);
     const previous = skillsInstalled[skill];
-    const currentStat = await assertSafeParents(rootInput, target);
-    const current = currentStat ? await readFile(path.join(rootInput, target), 'utf8') : null;
+    const currentStat = await assertSafeParents(root, target);
+    const current = currentStat ? await readFile(path.join(root, target), 'utf8') : null;
     const currentHash = current === null ? null : hash(current);
     let action: 'install' | 'update' | 'unchanged' | 'conflict';
     let reason: string | undefined;
@@ -97,16 +88,18 @@ export async function installClientGuidance(rootInput: string, client: GuidanceC
       continue;
     }
 
-    await atomicWrite(path.join(rootInput, target), source);
-    skillsInstalled[skill] = { skill, target, sourceHash, installedHash: sourceHash, sourceVersion: JSON.parse(await readFile(path.join(packageRoot, 'package.json'), 'utf8')).version };
+    await atomicWrite(path.join(root, target), source);
+    skillsInstalled[skill] = { target, sourceHash, installedHash: sourceHash, sourceVersion: JSON.parse(await readFile(path.join(packageRoot, 'package.json'), 'utf8')).version };
     results.push({ ...result, applied: true });
   }
 
-  manifest.clients[client] = clientSkills;
-  manifest.skills = skillsInstalled;
+  manifest.clients[client] = skillsInstalled;
   await atomicWrite(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
   const anyApplied = results.some(r => r.applied);
-  const appliedCount = results.filter(r => r.applied).length;
-  return { client, action: 'install', applied: anyApplied, results, appliedCount, totalCount: results.length };
+  const hasConflict = results.some(r => r.action === 'conflict');
+  const hasUpdate = results.some(r => r.action === 'update');
+  const hasUnchanged = results.every(r => r.action === 'unchanged');
+  const aggregateAction = hasConflict ? 'conflict' : hasUpdate ? 'update' : hasUnchanged ? 'unchanged' : 'install';
+  return { client, action: aggregateAction, applied: anyApplied, results };
 }

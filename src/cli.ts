@@ -222,12 +222,15 @@ Options:
       const { selectProfile } = await import('./auth.js');
       const profile = await selectProfile(origin);
       if (!profile) fail('profile_not_found', `No profile exists for ${origin}.`, `Run \`notchlet auth login --server ${origin}\` first.`, 2);
-      console.log(box([
-        section('Profile selected'),
-        kv('Server', profile.origin),
-        kv('Auth mode', profile.authMode ?? '(unknown)'),
-        kv('Current', 'yes'),
-      ]));
+      if (json) { print({ profile, current: true }); }
+      else {
+        console.log(box([
+          section('Profile selected'),
+          kv('Server', profile.origin),
+          kv('Auth mode', profile.authMode ?? '(unknown)'),
+          kv('Current', 'yes'),
+        ]));
+      }
     }
     else if (command === 'workspace' && ['bind', 'rebind'].includes(positional[1] ?? '')) {
       if (args.includes('--help') || args.includes('-h')) {
@@ -454,7 +457,8 @@ Options:
         const lines: string[] = [];
         lines.push(section(`Client guidance: ${result.action}`));
         lines.push(kv('Client', result.client));
-        lines.push(kv('Skills', `${result.appliedCount}/${result.totalCount} ${result.applied ? ok('applied') : warn('preview (use --apply to install)')}`));
+        const appliedCount = result.results.filter(r => r.applied).length;
+        lines.push(kv('Skills', `${appliedCount}/${result.results.length} ${result.applied ? ok('applied') : warn('preview (use --apply to install)')}`));
         for (const r of result.results) {
           const status = r.applied ? ok(r.action) : r.action === 'unchanged' ? warn('unchanged') : err(r.action);
           lines.push(kv(r.skill, `${status}${r.reason ? ` - ${r.reason}` : ''}`));

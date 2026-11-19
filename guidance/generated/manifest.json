@@ -1,99 +1,140 @@
 {
   "manifestVersion": 1,
   "source": "guidance/notchlet-super.md",
-  "sourceVersion": "0.1.0",
-  "sourceSha256": "3290a10b8743f8e1ca6582350dae48b1de1f2b090676c068b127853522c1a035",
+  "sourceVersion": "0.2.0",
+  "sourceSha256": "b815e49448a9d67f47919142f3ab3cbd0426dc6743666cca8ba5eb5f44e8a9e5",
   "skillsRepo": "C:\\Users\\mbint\\orca\\notchlet-skills",
   "skillCount": 8,
   "skills": {
     "notchlet-deliver": {
-      "source": "mbintangr/notchlet-skills",
-      "commit": "580fae3cfcf5f46868b2b795fe4ec9e0f629a707",
-      "sourceType": "github",
-      "skillPath": "skills/notchlet-deliver/SKILL.md",
-      "computedHash": "83ec1b278f5c3515b99cfe21fca362b9d9858609fbcd88e3fa9423b39d5d054b"
+      "hash": "b9fa3a7c2ebad964cd7c6c607d952d9069b47d68ae9764b3499eb72fe31120b0",
+      "path": "skills/notchlet-deliver/SKILL.md"
     },
     "notchlet-implement": {
-      "source": "mbintangr/notchlet-skills",
-      "commit": "580fae3cfcf5f46868b2b795fe4ec9e0f629a707",
-      "sourceType": "github",
-      "skillPath": "skills/notchlet-implement/SKILL.md",
-      "computedHash": "aa4fd302538905b255074b17e6f6de9663ae075a8058e1c3c56341e00365e878"
+      "hash": "a4f73828f2f267e106e1dbcd15721e71558d8d26369bdbf46d24ca35e74dbbb5",
+      "path": "skills/notchlet-implement/SKILL.md"
     },
     "notchlet-init": {
-      "source": "mbintangr/notchlet-skills",
-      "commit": "580fae3cfcf5f46868b2b795fe4ec9e0f629a707",
-      "sourceType": "github",
-      "skillPath": "skills/notchlet-init/SKILL.md",
-      "computedHash": "19231777a55fd50024cf3bd167dbf06910b1ac844a2b35f503a3f24782567838"
+      "hash": "19231777a55fd50024cf3bd167dbf06910b1ac844a2b35f503a3f24782567838",
+      "path": "skills/notchlet-init/SKILL.md"
     },
     "notchlet-mcp": {
-      "source": "mbintangr/notchlet-skills",
-      "commit": "580fae3cfcf5f46868b2b795fe4ec9e0f629a707",
-      "sourceType": "github",
-      "skillPath": "skills/notchlet-mcp/SKILL.md",
-      "computedHash": "2d594adaa874da84ab7ce873ebcfa8a073b61faab9e751559032a3ebf2945a15"
+      "hash": "343d5f317fc4f70f6feb8ee8ee87a783530654fb6ef761125e5a956c3e6904c4",
+      "path": "skills/notchlet-mcp/SKILL.md"
     },
     "notchlet-plan": {
-      "source": "mbintangr/notchlet-skills",
-      "commit": "580fae3cfcf5f46868b2b795fe4ec9e0f629a707",
-      "sourceType": "github",
-      "skillPath": "skills/notchlet-plan/SKILL.md",
-      "computedHash": "3b0152ea2163b658c67a2b6156916059bfd9ff27b61309e386ebf17d4b3d8163"
+      "hash": "00b624ed62196fd502548533c72dadec0973866fdd0d19ae7b877bdea643076c",
+      "path": "skills/notchlet-plan/SKILL.md"
     },
     "notchlet-platform": {
-      "source": "mbintangr/notchlet-skills",
-      "commit": "580fae3cfcf5f46868b2b795fe4ec9e0f629a707",
-      "sourceType": "github",
-      "skillPath": "skills/notchlet-platform/SKILL.md",
-      "computedHash": "9eeb5ebb62b9409f5cbc3d82a2576249d6da0e96a60b1d552635cca3b6f2d005"
+      "hash": "9f5d10f1fc9799afbec94848db7d0ac56c5f7e11af3845d463ce3b1ab953e1df",
+      "path": "skills/notchlet-platform/SKILL.md"
     },
     "notchlet-review": {
-      "source": "mbintangr/notchlet-skills",
-      "commit": "580fae3cfcf5f46868b2b795fe4ec9e0f629a707",
-      "sourceType": "github",
-      "skillPath": "skills/notchlet-review/SKILL.md",
-      "computedHash": "1eda20eb785caecdee752db5d24528008cb34e182b2f8e60cf28acfba5ef6063"
+      "hash": "494ac24ab377611c934a14dc6530ac3b4433ea2ad3f569e6be0c1a90e81a336b",
+      "path": "skills/notchlet-review/SKILL.md"
     },
     "notchlet-super": {
-      "source": "mbintangr/notchlet-skills",
-      "commit": "580fae3cfcf5f46868b2b795fe4ec9e0f629a707",
-      "sourceType": "github",
-      "skillPath": "skills/notchlet-super/SKILL.md",
-      "computedHash": "5a1e432fd86e6c5e66698aaa7c7daf95530ef7092437f461c94b9d44bed8a865"
+      "hash": "b815e49448a9d67f47919142f3ab3cbd0426dc6743666cca8ba5eb5f44e8a9e5",
+      "path": "skills/notchlet-super/SKILL.md"
     }
   },
-  "aliases": {
-    "notchlet-development": {
-      "skills": [
-        "notchlet-super"
-      ],
-      "note": "The state router handles whole-cycle requests; use the phase-specific skills below when the request is limited to one phase."
+  "targets": [
+    {
+      "client": "opencode",
+      "path": "guidance/generated/opencode/notchlet-deliver/SKILL.md",
+      "sha256": "b9fa3a7c2ebad964cd7c6c607d952d9069b47d68ae9764b3499eb72fe31120b0",
+      "skill": "notchlet-deliver"
     },
-    "notchlet-backlog-planning": {
-      "skills": [
-        "notchlet-plan"
-      ],
-      "note": "Use the current planning skill."
+    {
+      "client": "opencode",
+      "path": "guidance/generated/opencode/notchlet-implement/SKILL.md",
+      "sha256": "a4f73828f2f267e106e1dbcd15721e71558d8d26369bdbf46d24ca35e74dbbb5",
+      "skill": "notchlet-implement"
     },
-    "notchlet-delivery": {
-      "skills": [
-        "notchlet-deliver"
-      ],
-      "note": "Use the current delivery skill."
+    {
+      "client": "opencode",
+      "path": "guidance/generated/opencode/notchlet-init/SKILL.md",
+      "sha256": "19231777a55fd50024cf3bd167dbf06910b1ac844a2b35f503a3f24782567838",
+      "skill": "notchlet-init"
     },
-    "notchlet-init": {
-      "skills": [
-        "notchlet-mcp"
-      ],
-      "commands": [
-        "notchlet init"
-      ],
-      "note": "Local workspace initialization and MCP connection setup are separate actions."
+    {
+      "client": "opencode",
+      "path": "guidance/generated/opencode/notchlet-mcp/SKILL.md",
+      "sha256": "343d5f317fc4f70f6feb8ee8ee87a783530654fb6ef761125e5a956c3e6904c4",
+      "skill": "notchlet-mcp"
     },
-    "notchlet-n8n-migration": {
-      "skills": [],
-      "note": "Outside the current core mirror; preserve any installed specialization."
+    {
+      "client": "opencode",
+      "path": "guidance/generated/opencode/notchlet-plan/SKILL.md",
+      "sha256": "00b624ed62196fd502548533c72dadec0973866fdd0d19ae7b877bdea643076c",
+      "skill": "notchlet-plan"
+    },
+    {
+      "client": "opencode",
+      "path": "guidance/generated/opencode/notchlet-platform/SKILL.md",
+      "sha256": "9f5d10f1fc9799afbec94848db7d0ac56c5f7e11af3845d463ce3b1ab953e1df",
+      "skill": "notchlet-platform"
+    },
+    {
+      "client": "opencode",
+      "path": "guidance/generated/opencode/notchlet-review/SKILL.md",
+      "sha256": "494ac24ab377611c934a14dc6530ac3b4433ea2ad3f569e6be0c1a90e81a336b",
+      "skill": "notchlet-review"
+    },
+    {
+      "client": "opencode",
+      "path": "guidance/generated/opencode/notchlet-super/SKILL.md",
+      "sha256": "b815e49448a9d67f47919142f3ab3cbd0426dc6743666cca8ba5eb5f44e8a9e5",
+      "skill": "notchlet-super"
+    },
+    {
+      "client": "claude-code",
+      "path": "guidance/generated/claude-code/notchlet-deliver/SKILL.md",
+      "sha256": "b9fa3a7c2ebad964cd7c6c607d952d9069b47d68ae9764b3499eb72fe31120b0",
+      "skill": "notchlet-deliver"
+    },
+    {
+      "client": "claude-code",
+      "path": "guidance/generated/claude-code/notchlet-implement/SKILL.md",
+      "sha256": "a4f73828f2f267e106e1dbcd15721e71558d8d26369bdbf46d24ca35e74dbbb5",
+      "skill": "notchlet-implement"
+    },
+    {
+      "client": "claude-code",
+      "path": "guidance/generated/claude-code/notchlet-init/SKILL.md",
+      "sha256": "19231777a55fd50024cf3bd167dbf06910b1ac844a2b35f503a3f24782567838",
+      "skill": "notchlet-init"
+    },
+    {
+      "client": "claude-code",
+      "path": "guidance/generated/claude-code/notchlet-mcp/SKILL.md",
+      "sha256": "343d5f317fc4f70f6feb8ee8ee87a783530654fb6ef761125e5a956c3e6904c4",
+      "skill": "notchlet-mcp"
+    },
+    {
+      "client": "claude-code",
+      "path": "guidance/generated/claude-code/notchlet-plan/SKILL.md",
+      "sha256": "00b624ed62196fd502548533c72dadec0973866fdd0d19ae7b877bdea643076c",
+      "skill": "notchlet-plan"
+    },
+    {
+      "client": "claude-code",
+      "path": "guidance/generated/claude-code/notchlet-platform/SKILL.md",
+      "sha256": "9f5d10f1fc9799afbec94848db7d0ac56c5f7e11af3845d463ce3b1ab953e1df",
+      "skill": "notchlet-platform"
+    },
+    {
+      "client": "claude-code",
+      "path": "guidance/generated/claude-code/notchlet-review/SKILL.md",
+      "sha256": "494ac24ab377611c934a14dc6530ac3b4433ea2ad3f569e6be0c1a90e81a336b",
+      "skill": "notchlet-review"
+    },
+    {
+      "client": "claude-code",
+      "path": "guidance/generated/claude-code/notchlet-super/SKILL.md",
+      "sha256": "b815e49448a9d67f47919142f3ab3cbd0426dc6743666cca8ba5eb5f44e8a9e5",
+      "skill": "notchlet-super"
     }
-  }
+  ]
 }
