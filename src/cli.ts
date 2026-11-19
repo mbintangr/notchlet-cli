@@ -188,6 +188,11 @@ async function requireWorkspace(what: string): Promise<string> {
   return root;
 }
 
+async function packageVersion(): Promise<string> {
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
+  return manifest.version;
+}
+
 async function main() {
   try {
     // Command-specific --help is handled inside each command block below.
@@ -195,7 +200,10 @@ async function main() {
     if ((command === 'help' || positional.length === 0) && (args.includes('--help') || args.includes('-h') || command === 'help')) {
       print({ usage }, usage);
     }
-    else if (args.includes('--version') || command === 'version') { print({ version: '0.1.0', coreVersion: CORE_VERSION }, `notchlet 0.1.0 · @notchlet/core ${CORE_VERSION}`); }
+    else if (args.includes('--version') || command === 'version') {
+      const version = await packageVersion();
+      print({ version, coreVersion: CORE_VERSION }, `notchlet ${version} · @notchlet/core ${CORE_VERSION}`);
+    }
     else if (command === 'auth') {
       const action = positional[1];
       if (args.includes('--help') || args.includes('-h')) {

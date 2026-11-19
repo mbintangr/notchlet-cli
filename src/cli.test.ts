@@ -466,6 +466,7 @@ test('packed core and CLI install together and run from an isolated path with sp
   const globalPrefix = path.join(os.tmpdir(), `notchlet-global-${Date.now()}`);
   const cliPackage = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const corePackage = path.resolve(cliPackage, '../notchlet-core');
+  const cliPackageVersion = JSON.parse(await readFile(path.join(cliPackage, 'package.json'), 'utf8')).version;
   try {
     const filenames: string[] = [];
     for (const packageDir of [corePackage, cliPackage]) {
@@ -482,7 +483,7 @@ test('packed core and CLI install together and run from an isolated path with sp
     const installedCli = path.join(consumer, 'node_modules', '@notchlet', 'cli', 'dist', 'cli.js');
     const version = spawnSync(process.execPath, [installedCli, '--version', '--json'], { cwd: consumer, encoding: 'utf8' });
     assert.equal(version.status, 0, version.stderr);
-    assert.deepEqual(JSON.parse(version.stdout).data, { version: '0.1.0', coreVersion: '0.1.0' });
+    assert.deepEqual(JSON.parse(version.stdout).data, { version: cliPackageVersion, coreVersion: '0.1.0' });
     const status = spawnSync(process.execPath, [installedCli, 'status', '--json'], { cwd: consumer, encoding: 'utf8' });
     assert.equal(status.status, 0, status.stderr);
     assert.equal(JSON.parse(status.stdout).data.workspace, null);
@@ -495,7 +496,7 @@ test('packed core and CLI install together and run from an isolated path with sp
       ? spawnSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/c', 'call', globalBin, '--version', '--json'], { cwd: consumer, encoding: 'utf8' })
       : spawnSync(globalBin, ['--version', '--json'], { cwd: consumer, encoding: 'utf8' });
     assert.equal(globalVersion.status, 0, globalVersion.stderr);
-    assert.deepEqual(JSON.parse(globalVersion.stdout).data, { version: '0.1.0', coreVersion: '0.1.0' });
+    assert.deepEqual(JSON.parse(globalVersion.stdout).data, { version: cliPackageVersion, coreVersion: '0.1.0' });
   } finally {
     await rm(consumer, { recursive: true, force: true });
     await rm(packDir, { recursive: true, force: true });
