@@ -32,9 +32,11 @@ for (const shape of ['mcp.servers', 'mcpServers', "type: 'stdio'"]) {
 if (!mcpSkillSource.includes('notchlet init --interactive') || !mcpSkillSource.includes('notchlet mcp status') || /your-mcp-token|curl\s+[^\n]*\/mcp|pg\.mbintangr\.com\/mcp/i.test(mcpSkillSource)) {
   throw new Error('notchlet-mcp guidance must explain supported init/status setup without a static token, old hosted origin, or unauthenticated GET probe.');
 }
+const instructionsLine = source.split(/\r?\n/).find(line => line.includes('notchlet instructions') && line.includes('--action'));
+if (!instructionsLine) throw new Error('Canonical guidance does not document the instructions action surface.');
 for (const action of ['plan', 'revise', 'implement', 'verify', 'resume']) {
   if (!cliSource.includes(`'${action}'`)) throw new Error(`Guidance references an unsupported workflow action: ${action}`);
-  if (!source.includes(`--action ${action}`)) throw new Error(`Canonical guidance does not reference its declared workflow action: ${action}`);
+  if (!new RegExp(`\\b${action}\\b`).test(instructionsLine)) throw new Error(`Canonical guidance does not reference its declared workflow action: ${action}`);
 }
 
 const skillLock = JSON.parse(await readFile(path.join(skillsRepoRoot, 'skills-lock.json'), 'utf8'));
@@ -66,7 +68,6 @@ for (const [name, args] of Object.entries(requiredTools)) {
   const definition = toolSources.flatMap(text => text.split(/\r?\n/)).find(line => line.includes(`name: '${name}'`));
   if (!definition) throw new Error(`Guidance references an MCP tool not registered by the server: ${name}`);
   for (const arg of args) if (!definition.includes(arg)) throw new Error(`Guidance references unsupported ${name} argument: ${arg}`);
-  if (!source.includes(`\`${name}({`)) throw new Error(`Canonical guidance does not reference its declared MCP tool: ${name}`);
 }
 const developmentToolSource = toolSources[1];
 for (const action of ['plan', 'revise', 'implement', 'verify', 'resume']) {
@@ -74,8 +75,15 @@ for (const action of ['plan', 'revise', 'implement', 'verify', 'resume']) {
 }
 
 if (/notchlet-init|curl\s+[^\n]*\/mcp/i.test(source)) throw new Error('Canonical guidance contains a stale init or unauthenticated MCP GET assumption.');
-if (!/Explore \/ investigate \(read-only\)[\s\S]*?Do not run `notchlet init`/.test(source)) throw new Error('Explore guidance must explicitly be read-only and avoid initialization.');
-if (!/Plan only \(read-only unless asked to persist\)[\s\S]*?does not require initialization, an epic→story→task hierarchy, or application\/change-artifact writes/.test(source)) throw new Error('Planning guidance must be read-only by default and independent of initialization and backlog hierarchy.');
+if (!/## Capability mode/.test(source) || !/\*\*Connected\*\*[\s\S]*?\*\*Local\*\*[\s\S]*?\*\*Neither\*\*/.test(source)) throw new Error('Canonical guidance must declare the connected, local, and unavailable capability modes.');
+for (const phase of ['Phase 1 — Plan & grill', 'Phase 2 — Create backlogs', 'Phase 3 — Implement', 'Phase 4 — Deliver', 'Phase 5 — Done']) {
+  if (!source.includes(phase)) throw new Error(`Canonical guidance is missing its ${phase} phase.`);
+}
+for (const syntax of ['notchlet workspace bind', 'notchlet backlog import', 'notchlet change apply', 'notchlet verify <change> --record', 'notchlet sync status|push|pull --change', 'notchlet checkpoint --change']) {
+  if (!source.includes(syntax)) throw new Error(`Canonical guidance does not document its CLI tracking command: ${syntax}`);
+}
+if (!/sync pending/.test(source)) throw new Error('Canonical guidance must defer platform-only steps in local mode as sync pending.');
+if (!/Never push, open or merge a PR, deploy, or set DONE without explicit authorization/.test(source)) throw new Error('Canonical guidance must gate external side effects on explicit authorization.');
 
 const clients = ['opencode', 'claude-code', 'agent'];
 const skillDirs = await readdir(skillsSourceDir);

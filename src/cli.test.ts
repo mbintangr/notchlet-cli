@@ -91,7 +91,7 @@ test('client guidance CLI previews install, applies safely, and reports local ed
     const applied = run(['client', 'init', 'opencode', '--apply', '--json']);
     assert.equal(applied.status, 0, applied.stderr);
     assert.equal(JSON.parse(applied.stdout).data.applied, true);
-    assert.match(await readFile(target, 'utf8'), /state-aware router/);
+    assert.match(await readFile(target, 'utf8'), /full-cycle orchestrator/);
     assert.equal((await readFile(config, 'utf8')).includes('preserve'), true);
 
     await writeFile(target, `${await readFile(target, 'utf8')}\n# User edit\n`);
