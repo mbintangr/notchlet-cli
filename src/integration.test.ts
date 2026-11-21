@@ -423,19 +423,19 @@ test('auto sync keeps offline local work and reconciles it on the next online CL
     const offline = await autoSyncChange(f.root, change.id, { server: f.server, fetch: (async () => { throw new TypeError('offline'); }) as typeof fetch });
     assert.equal(offline.state, 'pending');
     assert.equal(f.remote.metadata.snapshotRevision, null);
-    assert.match(await readFile(path.join(f.root, '.notchlet', 'changes', change.id, 'proposal.md'), 'utf8'), /Fill in intent/);
+    assert.equal(JSON.parse(await readFile(path.join(f.root, '.notchlet', 'changes', change.id, 'proposal.json'), 'utf8')).change.name, 'Automatic sync example');
 
     const reconnected = await autoSyncChange(f.root, change.id, { server: f.server, fetch: f.fetcher });
     assert.equal(reconnected.state, 'pushed');
     assert.equal(f.remote.metadata.snapshotRevision, 1);
-    await writeFile(path.join(f.root, '.notchlet', 'changes', change.id, 'proposal.md'), '# Updated after reconnect\n');
+    await writeFile(path.join(f.root, '.notchlet', 'changes', change.id, 'proposal.json'), '# Updated after reconnect\n');
     const nextLocalEdit = await autoSyncChange(f.root, change.id, { server: f.server, fetch: f.fetcher });
     assert.equal(nextLocalEdit.state, 'pushed');
     assert.equal(f.remote.metadata.snapshotRevision, 2);
 
     await setWorkspaceSyncMode(f.root, 'manual');
     assert.equal(await getWorkspaceSyncMode(f.root), 'manual');
-    await writeFile(path.join(f.root, '.notchlet', 'changes', change.id, 'proposal.md'), '# Manual edit\n');
+    await writeFile(path.join(f.root, '.notchlet', 'changes', change.id, 'proposal.json'), '# Manual edit\n');
     assert.equal((await autoSyncChange(f.root, change.id, { server: f.server, fetch: f.fetcher })).state, 'manual');
     assert.equal(f.remote.metadata.snapshotRevision, 2);
   } finally { await f.dispose(); }
@@ -455,7 +455,7 @@ test('sync push reconciles a lost create response and a lost snapshot response w
 
     const second = await scaffold(f.root, 'Lost upload response recovery', 'quick');
     assert.equal((await syncPush(f.root, second.id, { server: f.server, fetch: f.fetcher, yes: true })).state, 'pushed');
-    await writeFile(path.join(f.root, '.notchlet', 'changes', second.id, 'proposal.md'), '# Updated snapshot\n');
+    await writeFile(path.join(f.root, '.notchlet', 'changes', second.id, 'proposal.json'), '# Updated snapshot\n');
     f.remote.loseNextWriteResponse = true;
     await assert.rejects(syncPush(f.root, second.id, { server: f.server, fetch: f.fetcher, yes: true }), /simulated lost response/);
     const uploadJournal = JSON.parse(await readFile(path.join(f.root, '.notchlet', '.local', 'sync', `${second.id}.snapshot.operation.json`), 'utf8'));
@@ -517,9 +517,9 @@ test('sync status distinguishes local-only; remote-only pull safely writes files
     const change = await scaffold(f.root, 'Sync pull', 'quick');
     assert.equal((await syncStatus(f.root, change.id)).state, 'local-only');
     assert.equal((await syncPush(f.root, change.id, { server: f.server, fetch: f.fetcher, yes: true })).state, 'pushed');
-    const proposal = path.join(f.root, '.notchlet', 'changes', change.id, 'proposal.md');
+    const proposal = path.join(f.root, '.notchlet', 'changes', change.id, 'proposal.json');
     const remotePackage = JSON.parse(Buffer.from(f.remote.content.get(f.remote.snapshots[0].id).content, 'base64').toString());
-    remotePackage.artifacts['proposal.md'] = '# Remote edit\n';
+    remotePackage.artifacts['proposal.json'] = '# Remote edit\n';
     const bytes = Buffer.from(JSON.stringify(remotePackage)), hash = digest(bytes), id = '33333333-3333-4333-8333-333333333333';
     const snapshot = { ...f.remote.snapshots[0], id, revision: 2, sha256: hash, sizeBytes: bytes.length, changeRevision: f.remote.metadata.revision + 1 };
     f.remote.snapshots.unshift(snapshot); f.remote.content.set(id, { ...snapshot, content: bytes.toString('base64') }); f.remote.metadata.revision++;
@@ -528,7 +528,7 @@ test('sync status distinguishes local-only; remote-only pull safely writes files
     assert.equal(await readFile(proposal, 'utf8'), '# Remote edit\n');
     const localState = JSON.parse(await readFile(path.join(f.root, '.notchlet', '.local', 'sync', `${change.id}.json`), 'utf8'));
     assert.equal(localState.baseHash, hash);
-    remotePackage.artifacts['proposal.md'] = '# New remote\n';
+    remotePackage.artifacts['proposal.json'] = '# New remote\n';
     const nextBytes = Buffer.from(JSON.stringify(remotePackage)), nextId = '44444444-4444-4444-8444-444444444444';
     const next = { ...snapshot, id: nextId, revision: 3, sha256: digest(nextBytes), sizeBytes: nextBytes.length, changeRevision: f.remote.metadata.revision + 1 };
     f.remote.snapshots.unshift(next); f.remote.content.set(nextId, { ...next, content: nextBytes.toString('base64') }); f.remote.metadata.revision++;
@@ -547,7 +547,7 @@ test('sync conflict resolution requires a verified base, validates remote artifa
     await syncPush(f.root, change.id, { server: f.server, fetch: f.fetcher, yes: true });
     const statePath = path.join(f.root, '.notchlet', '.local', 'sync', `${change.id}.json`);
     const state = JSON.parse(await readFile(statePath, 'utf8'));
-    const proposal = path.join(f.root, '.notchlet', 'changes', change.id, 'proposal.md');
+    const proposal = path.join(f.root, '.notchlet', 'changes', change.id, 'proposal.json');
     await writeFile(proposal, '# User reconciliation\n');
 
     const originalPackage = JSON.parse(Buffer.from(f.remote.content.get(f.remote.snapshots[0].id).content, 'base64').toString());
@@ -565,7 +565,7 @@ test('sync conflict resolution requires a verified base, validates remote artifa
 
     // Restore a valid current snapshot and prove the resolver refuses absent base metadata.
     const validRemotePackage = structuredClone(originalPackage);
-    validRemotePackage.artifacts['proposal.md'] = '# Other client edit\n';
+    validRemotePackage.artifacts['proposal.json'] = '# Other client edit\n';
     const validBytes = Buffer.from(JSON.stringify(validRemotePackage));
     const valid = { ...incompatible, id: '77777777-7777-4777-8777-777777777777', revision: 3, sha256: digest(validBytes), sizeBytes: validBytes.length, changeRevision: f.remote.metadata.revision + 1 };
     f.remote.snapshots.unshift(valid); f.remote.content.set(valid.id, { ...valid, content: validBytes.toString('base64') });
@@ -596,9 +596,9 @@ test('sync rejects oversized packages and mismatched remote identity before muta
   const f = await syncFixture();
   try {
     const change = await scaffold(f.root, 'Guard checks', 'quick');
-    await writeFile(path.join(f.root, '.notchlet', 'changes', change.id, 'proposal.md'), 'x'.repeat(1_048_600));
+    await writeFile(path.join(f.root, '.notchlet', 'changes', change.id, 'proposal.json'), 'x'.repeat(1_048_600));
     await assert.rejects(syncPush(f.root, change.id, { server: f.server, fetch: f.fetcher, yes: true }), /1 MiB/);
-    await writeFile(path.join(f.root, '.notchlet', 'changes', change.id, 'proposal.md'), 'small');
+    await writeFile(path.join(f.root, '.notchlet', 'changes', change.id, 'proposal.json'), 'small');
     f.remote.caps = { ...syncCapabilities, server: { id: 'wrong-server', version: '1.0.0' } };
     await assert.rejects(syncPush(f.root, change.id, { server: f.server, fetch: f.fetcher, yes: true }), /identity/);
     assert.equal(f.remote.requests.filter(r => r.method === 'POST').length, 0);
@@ -666,19 +666,19 @@ test('packed CLI child process pushes, checkpoints, pulls, and explicitly resolv
   };
   try {
     const change = await scaffold(f.root, 'Packed connected route', 'quick');
-    const proposal = path.join(f.root, '.notchlet', 'changes', change.id, 'proposal.md');
+    const proposal = path.join(f.root, '.notchlet', 'changes', change.id, 'proposal.json');
     await writeFile(proposal, '# Local version\n');
 
     assert.equal((await run('sync', 'push', '--change', change.id, '--yes', '--endpoint', f.server)).state, 'pushed');
     assert.equal(f.remote.snapshots.length, 1);
     const initial = JSON.parse(Buffer.from(f.remote.content.get(f.remote.snapshots[0].id).content, 'base64').toString());
-    assert.equal(initial.artifacts['proposal.md'], '# Local version\n');
+    assert.equal(initial.artifacts['proposal.json'], '# Local version\n');
     assert.equal((await run('sync', 'status', '--change', change.id, '--endpoint', f.server)).state, 'unchanged');
     assert.equal((await run('checkpoint', '--change', change.id, '--name', 'Packed checkpoint', '--summary', 'Process route checked', '--endpoint', f.server)).state, 'checkpointed');
     assert.equal(f.remote.checkpointComments.length, 1);
 
     const remotePackage = structuredClone(initial);
-    remotePackage.artifacts['proposal.md'] = '# Remote version\n';
+    remotePackage.artifacts['proposal.json'] = '# Remote version\n';
     const bytes = Buffer.from(JSON.stringify(remotePackage));
     const remoteId = '33333333-3333-4333-8333-333333333333';
     const remoteSnapshot = { ...f.remote.snapshots[0], id: remoteId, revision: 2, sha256: digest(bytes), sizeBytes: bytes.length, changeRevision: f.remote.metadata.revision + 1 };
@@ -687,7 +687,7 @@ test('packed CLI child process pushes, checkpoints, pulls, and explicitly resolv
     f.remote.metadata = { ...f.remote.metadata, revision: remoteSnapshot.changeRevision, snapshotRevision: 2 };
     assert.equal((await run('sync', 'pull', '--change', change.id)).state, 'pulled');
     assert.equal(await readFile(proposal, 'utf8'), '# Remote version\n');
-    remotePackage.artifacts['proposal.md'] = '# Newer remote version\n';
+    remotePackage.artifacts['proposal.json'] = '# Newer remote version\n';
     const newerBytes = Buffer.from(JSON.stringify(remotePackage));
     const newerId = '44444444-4444-4444-8444-444444444444';
     const newerSnapshot = { ...remoteSnapshot, id: newerId, revision: 3, sha256: digest(newerBytes), sizeBytes: newerBytes.length, changeRevision: f.remote.metadata.revision + 1 };
@@ -710,7 +710,7 @@ test('packed CLI child process pushes, checkpoints, pulls, and explicitly resolv
     assert.equal(pushed.state, 'pushed');
     assert.equal(f.remote.snapshots.length, 4);
     const reconciled = JSON.parse(Buffer.from(f.remote.content.get(f.remote.snapshots[0].id).content, 'base64').toString());
-    assert.equal(reconciled.artifacts['proposal.md'], '# Divergent local version\n');
+    assert.equal(reconciled.artifacts['proposal.json'], '# Divergent local version\n');
   } finally {
     bridge.closeAllConnections();
   }

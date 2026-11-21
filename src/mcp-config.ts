@@ -3,6 +3,8 @@ import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path';
 
 export type McpClient = 'opencode' | 'claude';
+/** `bridge` and `local` run stdio; `remote` points the client at `<origin>/mcp` directly. */
+export type McpTransport = 'bridge' | 'remote' | 'local';
 /** OpenCode reads legacy flat `mcp.<name>` entries and the V2 `mcp.servers.<name>` shape. */
 export type OpenCodeConfigShape = 'legacy' | 'v2';
 export type McpConfigAction = 'create' | 'update' | 'unchanged' | 'conflict';
@@ -49,6 +51,12 @@ export function mcpServeInvocation(origin: string): string[] {
   return ['notchlet', 'mcp', 'serve', '--server', origin];
 }
 
+export function mcpLocalInvocation(): string[] {
+  return ['notchlet', 'mcp', 'serve', '--local'];
+}
+
+export const DEFAULT_MCP_TOKEN_ENV = 'NOTCHLET_MCP_TOKEN';
+
 /**
  * No `enabled` field: the V2 `mcp.servers` schema uses `disabled` (default
  * false) and rejects unknown keys, while legacy flat entries and OpenCode
@@ -59,8 +67,46 @@ export function openCodeServerEntry(origin: string) {
   return { type: 'local', command: mcpServeInvocation(origin) };
 }
 
+export function openCodeLocalServerEntry() {
+  return { type: 'local', command: mcpLocalInvocation() };
+}
+
+/** Remote entry matching OpenCode's documented `type: "remote"` shape. */
+export function openCodeRemoteServerEntry(origin: string, tokenEnv = DEFAULT_MCP_TOKEN_ENV) {
+  return {
+    type: 'remote',
+    url: `${origin}/mcp`,
+    headers: { Authorization: `Bearer {env:${tokenEnv}}` },
+  };
+}
+
 export function claudeServerEntry(origin: string) {
   return { type: 'stdio', command: 'notchlet', args: mcpServeInvocation(origin).slice(1), env: {} };
+}
+
+export function claudeLocalServerEntry() {
+  return { type: 'stdio', command: 'notchlet', args: mcpLocalInvocation().slice(1), env: {} };
+}
+
+/** Claude Code's streamable HTTP transport uses `type: "http"` with headers. */
+export function claudeRemoteServerEntry(origin: string, tokenEnv = DEFAULT_MCP_TOKEN_ENV) {
+  return {
+    type: 'http',
+    url: `${origin}/mcp`,
+    headers: { Authorization: `Bearer \${${tokenEnv}}` },
+  };
+}
+
+export function desiredMcpEntry(client: McpClient, origin: string, options: { transport?: McpTransport; tokenEnv?: string } = {}) {
+  const transport = options.transport ?? 'bridge';
+  if (client === 'opencode') {
+    if (transport === 'remote') return openCodeRemoteServerEntry(origin, options.tokenEnv);
+    if (transport === 'local') return openCodeLocalServerEntry();
+    return openCodeServerEntry(origin);
+  }
+  if (transport === 'remote') return claudeRemoteServerEntry(origin, options.tokenEnv);
+  if (transport === 'local') return claudeLocalServerEntry();
+  return claudeServerEntry(origin);
 }
 
 async function lstatOrNull(file: string) {
@@ -148,11 +194,11 @@ function container(value: Record<string, any>, client: McpClient): ServerContain
   return { servers: mcp.servers, shape: 'v2', ...(mcp.notchlet !== undefined ? { shadow: mcp.notchlet } : {}) };
 }
 
-export type MergeOptions = { managedEntryHash?: string; apply?: boolean };
+export type MergeOptions = { managedEntryHash?: string; apply?: boolean; transport?: McpTransport; tokenEnv?: string };
 
 export async function mergeMcpProjectConfig(rootInput: string, client: McpClient, origin: string, options: MergeOptions = {}): Promise<McpConfigPreview> {
   const root = path.resolve(rootInput);
-  const desired = client === 'opencode' ? openCodeServerEntry(origin) : claudeServerEntry(origin);
+  const desired = desiredMcpEntry(client, origin, options);
   const entryHash = hashMcpEntry(desired);
   const { file, relative, loaded, problem } = await loadConfig(root, client);
   if (problem) return { client, path: file, relativePath: relative, exists: loaded.exists, action: 'conflict', reason: problem };
@@ -194,9 +240,9 @@ export async function mergeMcpProjectConfig(rootInput: string, client: McpClient
   return { client, path: file, relativePath: relative, exists: loaded.exists, action, entryHash };
 }
 
-export async function inspectMcpProjectConfig(rootInput: string, client: McpClient, origin: string): Promise<McpConfigPreview & { present: boolean }> {
+export async function inspectMcpProjectConfig(rootInput: string, client: McpClient, origin: string, options: MergeOptions = {}): Promise<McpConfigPreview & { present: boolean }> {
   const root = path.resolve(rootInput);
-  const preview = await mergeMcpProjectConfig(root, client, origin);
+  const preview = await mergeMcpProjectConfig(root, client, origin, options);
   if (preview.action === 'conflict' && (preview.reason?.includes('differs from the generated entry') || preview.reason?.includes('overrides "mcp.servers.notchlet"'))) return { ...preview, present: true };
   return { ...preview, present: preview.action === 'unchanged' };
 }
@@ -223,8 +269,10 @@ export async function removeMcpProjectConfig(rootInput: string, client: McpClien
   if (!options.allowModified) {
     const existing: any = servers.notchlet;
     const looksGenerated = client === 'opencode'
-      ? Array.isArray(existing?.command) && existing.command[0] === 'notchlet' && existing.command[1] === 'mcp' && existing.command[2] === 'serve'
-      : existing?.command === 'notchlet' && Array.isArray(existing?.args) && existing.args[0] === 'mcp' && existing.args[1] === 'serve';
+      ? (Array.isArray(existing?.command) && existing.command[0] === 'notchlet' && existing.command[1] === 'mcp' && existing.command[2] === 'serve')
+        || (existing?.type === 'remote' && typeof existing.url === 'string' && existing.url.endsWith('/mcp'))
+      : (existing?.command === 'notchlet' && Array.isArray(existing?.args) && existing.args[0] === 'mcp' && existing.args[1] === 'serve')
+        || (existing?.type === 'http' && typeof existing.url === 'string' && existing.url.endsWith('/mcp'));
     if (!looksGenerated) return { client, path: file, relativePath: relative, action: 'conflict', reason: 'The existing Notchlet entry does not look like the generated bridge entry; confirm removal explicitly.' };
   }
   delete servers.notchlet;

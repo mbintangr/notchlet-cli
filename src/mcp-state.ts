@@ -17,10 +17,15 @@ export type McpClientMetadata = {
   serverName: 'notchlet';
   entryHash: string;
   configuredAt: string;
+  /** Absent in older state files, which recorded only the stdio bridge. */
+  transport?: 'bridge' | 'remote' | 'local';
+  /** Environment variable referenced by a remote entry's Authorization header. */
+  tokenEnv?: string;
 };
 
 export type McpServerState = {
-  credential: McpCredentialMetadata;
+  /** Local-only configuration has no remote credential. */
+  credential?: McpCredentialMetadata;
   clients: Partial<Record<McpClient, McpClientMetadata>>;
 };
 
@@ -65,7 +70,8 @@ export async function readMcpState(root: string): Promise<McpWorkspaceState> {
     const raw = JSON.parse(await readFile(file, 'utf8')) as Partial<McpWorkspaceState>;
     if (raw?.schemaVersion !== 1 || !raw.servers || typeof raw.servers !== 'object' || Array.isArray(raw.servers)) throw new Error('Invalid MCP state file.');
     for (const [origin, server] of Object.entries(raw.servers)) {
-      if (!server || typeof server !== 'object' || !server.credential || typeof server.credential.key !== 'string') throw new Error(`Invalid MCP state for ${origin}.`);
+      if (!server || typeof server !== 'object') throw new Error(`Invalid MCP state for ${origin}.`);
+      if (server.credential !== undefined && (typeof server.credential !== 'object' || typeof server.credential.key !== 'string')) throw new Error(`Invalid MCP state for ${origin}.`);
       if (!server.clients || typeof server.clients !== 'object') server.clients = {};
     }
     return raw as McpWorkspaceState;

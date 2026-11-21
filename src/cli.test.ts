@@ -53,6 +53,17 @@ test('init is repeatable and installed CLI handles working paths containing spac
     assert.equal(first.status, 0);
     assert.equal(second.status, 0);
     assert.equal(JSON.parse(second.stdout).ok, true);
+    assert.deepEqual(JSON.parse(first.stdout).data.localGuidance.written.sort(), ['.notchlet/README.md', 'AGENTS.md', 'PROMPT.md']);
+    assert.deepEqual(JSON.parse(second.stdout).data.localGuidance.written, []);
+    assert.deepEqual(JSON.parse(second.stdout).data.localGuidance.existing.sort(), ['.notchlet/README.md', 'AGENTS.md', 'PROMPT.md']);
+    assert.match(await readFile(path.join(dir, 'AGENTS.md'), 'utf8'), /notchlet instructions <change> --action implement/);
+    assert.match(await readFile(path.join(dir, 'PROMPT.md'), 'utf8'), /notchlet verify <change> --record/);
+    assert.match(await readFile(path.join(dir, '.notchlet', 'README.md'), 'utf8'), /closure\.json/);
+    await writeFile(path.join(dir, 'AGENTS.md'), '# Local agent notes\n');
+    const third = spawnSync(process.execPath, [cli, 'init', dir, '--json'], { encoding: 'utf8' });
+    assert.equal(third.status, 0);
+    assert.deepEqual(JSON.parse(third.stdout).data.localGuidance.existing.sort(), ['.notchlet/README.md', 'AGENTS.md', 'PROMPT.md']);
+    assert.equal(await readFile(path.join(dir, 'AGENTS.md'), 'utf8'), '# Local agent notes\n');
     const created = spawnSync(process.execPath, [cli, 'change', 'new', 'With spaces', '--quick', '--json'], { cwd: dir, encoding: 'utf8' });
     assert.equal(created.status, 0);
     const envelope = JSON.parse(created.stdout);
@@ -138,6 +149,16 @@ test('status, validate, and action-specific instructions expose one versioned JS
     assert.equal((JSON.parse(instructed.stdout).data as any).action, 'implement');
     assert.equal((JSON.parse(instructed.stdout).data as any).coreVersion, CORE_VERSION);
     assert.match((JSON.parse(instructed.stdout).data as any).instructions, /dependency-eligible tasks/);
+    const verifyInstructions = run(['instructions', id, '--action', 'verify']);
+    assert.equal(verifyInstructions.status, 0, verifyInstructions.stderr);
+    const verifyText = (JSON.parse(verifyInstructions.stdout).data as any).instructions as string;
+    assert.match(verifyText, /Verification is not applicable until checks are declared/);
+    assert.match(verifyText, /## Commands[\s\S]*notchlet change render .* --check/);
+    assert.match(verifyText, /## Artifacts\n\n- proposal\.json \[canonical\]: current \(proposal\.json\)\n- tasks\.json \[state\]: present \(tasks\.json\)/);
+    const kindHelp = spawnSync(process.execPath, [cli, 'change', 'add', 'my-change', 'check', '--help'], { cwd: dir, encoding: 'utf8' });
+    assert.equal(kindHelp.status, 0);
+    assert.match(kindHelp.stdout, /notchlet change add <change> check --id <id>/);
+    assert.match(kindHelp.stdout, /--command <cmd>/);
     const badAction = run(['instructions', id, '--action', 'publish']);
     assert.equal(badAction.status, 64);
     assert.equal(parseCliJsonEnvelope(JSON.parse(badAction.stdout)).error?.code, 'usage_error');
@@ -179,21 +200,31 @@ test('change close applies the previewed baseline revision and archives the acce
     const id = JSON.parse(created.stdout).data.id as string;
     const statePath = path.join(dir, '.notchlet', 'changes', id, 'tasks.json');
     const change = JSON.parse(await readFile(statePath, 'utf8'));
+    const requirement = { id: 'REQ-1', title: 'Requirement', description: 'Existing capability remains available.' };
+    const acceptanceScenario = { id: 'SCENARIO-1', requirementId: 'REQ-1', when: 'Acceptance runs', then: 'The capability remains available.' };
+    const addedRequirement = { id: 'REQ-2', title: 'Added requirement', description: 'The capability gains a durable behavior.' };
+    const addedScenario = { id: 'SCENARIO-2', requirementId: 'REQ-2', when: 'The new behavior runs', then: 'The durable behavior is available.' };
     Object.assign(change, {
-      capabilityName: 'cli-capability', baselineRevision: 0, capabilityImpact: 'none', capabilityRationale: 'No durable behavior changed.',
-      intent: 'Preserve existing behavior', outcome: 'Acceptance check passes',
-      requirements: [{ id: 'REQ-1', title: 'Requirement', description: 'Existing capability remains available.' }],
+      mode: 'standard', capabilityName: 'cli-capability', baselineRevision: 0, capabilityImpact: 'delta', capabilityRationale: 'Adds one durable behavior while preserving the existing capability.',
+      intent: 'Extend existing behavior', outcome: 'Acceptance check passes with the added behavior',
+      requirements: [requirement, addedRequirement], acceptanceScenarios: [acceptanceScenario, addedScenario],
+      capabilityDelta: { operations: [{ operation: 'add', requirementId: 'REQ-2', requirement: addedRequirement, scenarios: [addedScenario], rationale: 'Accept the added behavior.' }] },
+      designDecisions: [{ id: 'DECISION-1', decision: 'Add one durable behavior', rationale: 'Only that addition is in scope.' }],
       checks: [{ id: 'CHECK-1', description: 'Run required acceptance.' }],
-      tasks: [{ id: 'TASK-1', title: 'Complete task', status: 'completed', dependencies: [], requirementIds: ['REQ-1'] }],
+      tasks: [{ id: 'TASK-1', title: 'Complete task', status: 'completed', dependencies: [], requirementIds: ['REQ-1', 'REQ-2'] }],
+      artifacts: { ...change.artifacts, 'design.md': 'design.md' },
     });
     await writeFile(statePath, JSON.stringify(change, null, 2));
-    await appendEvidence(dir, id, { kind: 'check', outcome: 'passed', summary: 'Acceptance passed', requirementIds: ['REQ-1'], taskIds: ['TASK-1'], checkIds: ['CHECK-1'], provenance: 'recorded' });
+    await writeFile(path.join(dir, '.notchlet', 'changes', id, 'design.md'), '# Design\n\nPreserve the existing capability, add the declared behavior, and verify it with the declared check.\n');
+    const rendered = run(['change', 'render', id, '--write']);
+    assert.equal(rendered.status, 0, rendered.stderr);
+    await appendEvidence(dir, id, { kind: 'check', outcome: 'passed', summary: 'Acceptance passed', requirementIds: ['REQ-1', 'REQ-2'], taskIds: ['TASK-1'], checkIds: ['CHECK-1'], provenance: 'recorded' });
     const capabilities = path.join(dir, '.notchlet', 'capabilities');
     await mkdir(capabilities, { recursive: true });
     await writeFile(path.join(capabilities, 'cli-capability.yaml'), JSON.stringify({
       schemaVersion: 1, name: 'cli-capability', revision: 0,
-      requirements: [{ value: { id: 'REQ-1', title: 'Requirement', description: 'Existing capability remains available.' }, provenance: { changeId: 'prior-change', revision: 1, acceptedAt: '2026-01-01T00:00:00Z', rationale: 'Previously accepted.' } }],
-      scenarios: [],
+      requirements: [{ value: requirement, provenance: { changeId: 'prior-change', revision: 1, acceptedAt: '2026-01-01T00:00:00Z', rationale: 'Previously accepted.' } }],
+      scenarios: [{ value: acceptanceScenario, provenance: { changeId: 'prior-change', revision: 1, acceptedAt: '2026-01-01T00:00:00Z', rationale: 'Previously accepted.' } }],
     }));
     const preview = run(['change', 'close', id, '--preview']);
     assert.equal(preview.status, 0, preview.stderr);
@@ -202,6 +233,191 @@ test('change close applies the previewed baseline revision and archives the acce
     assert.equal(closed.status, 0, `${closed.stderr}\n${closed.stdout}`);
     assert.equal(JSON.parse(closed.stdout).data.baselineRevision, 1);
     assert.equal(JSON.parse(await readFile(path.join(dir, '.notchlet', 'capabilities', 'cli-capability.yaml'), 'utf8')).revision, 1);
+    await access(path.join(dir, '.notchlet', 'archive', id, 'tasks.json'));
+    const manifest = JSON.parse(await readFile(path.join(dir, '.notchlet', 'archive', id, 'closure.json'), 'utf8'));
+    assert.equal(manifest.changeId, id);
+    assert.equal(manifest.capability.resultingRevision, 1);
+    assert.equal(manifest.verification.status, 'current');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('quick no-impact change closes through the CLI without a baseline revision or baseline file', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'notchlet-no-impact-cli-'));
+  const cli = process.env.NOTCHLET_PACKED_CLI_PATH ?? path.resolve('dist/cli.js');
+  const run = (args: string[]) => spawnSync(process.execPath, [cli, ...args, '--json'], { cwd: dir, encoding: 'utf8' });
+  try {
+    assert.equal(run(['init']).status, 0);
+    const created = run(['change', 'new', 'No impact closure', '--quick']);
+    const id = JSON.parse(created.stdout).data.id as string;
+    const statePath = path.join(dir, '.notchlet', 'changes', id, 'tasks.json');
+    const change = JSON.parse(await readFile(statePath, 'utf8'));
+    Object.assign(change, {
+      capabilityImpact: 'none', capabilityRationale: 'Documentation-only maintenance with no durable behavior change.',
+      intent: 'Maintain behavior', outcome: 'Behavior is unchanged',
+      requirements: [{ id: 'REQ-1', title: 'Requirement', description: 'Existing behavior remains.' }],
+      checks: [{ id: 'CHECK-1', description: 'Run acceptance check.' }],
+      tasks: [{ id: 'TASK-1', title: 'Complete work', status: 'completed', dependencies: [], requirementIds: ['REQ-1'] }],
+    });
+    await writeFile(statePath, JSON.stringify(change, null, 2));
+    assert.equal(run(['change', 'render', id, '--write']).status, 0);
+    await appendEvidence(dir, id, { kind: 'check', outcome: 'passed', summary: 'Acceptance passed', requirementIds: ['REQ-1'], taskIds: ['TASK-1'], checkIds: ['CHECK-1'], provenance: 'recorded' });
+
+    const before = await readFile(statePath, 'utf8');
+    const preview = run(['change', 'close', id, '--preview']);
+    assert.equal(preview.status, 0, preview.stderr);
+    const previewData = JSON.parse(preview.stdout).data;
+    assert.equal(previewData.contribution, 'none');
+    assert.deepEqual(previewData.blockers, []);
+    assert.equal(previewData.verification.basis, 'artifact');
+    assert.equal(await readFile(statePath, 'utf8'), before);
+
+    const humanPreview = spawnSync(process.execPath, [cli, 'change', 'close', id, '--preview'], { cwd: dir, encoding: 'utf8' });
+    assert.equal(humanPreview.status, 0, humanPreview.stderr);
+    assert.match(humanPreview.stdout, /Capability contribution/);
+    assert.match(humanPreview.stdout, /Planning readiness/);
+    assert.match(humanPreview.stdout, /Verification/);
+    assert.match(humanPreview.stdout, /Local closure/);
+    assert.match(humanPreview.stdout, /Remote delivery/);
+    assert.match(humanPreview.stdout, /No files were changed/);
+
+    const rejected = run(['change', 'close', id, '--baseline-revision', '0']);
+    assert.equal(rejected.status, 64);
+    assert.equal(JSON.parse(rejected.stdout).error.code, 'usage_error');
+
+    const closed = run(['change', 'close', id]);
+    assert.equal(closed.status, 0, `${closed.stderr}\n${closed.stdout}`);
+    assert.equal(JSON.parse(closed.stdout).data.archived, true);
+    await access(path.join(dir, '.notchlet', 'archive', id, 'tasks.json'));
+    await access(path.join(dir, '.notchlet', 'archive', id, 'closure.json'));
+    await assert.rejects(access(path.join(dir, '.notchlet', 'capabilities')));
+
+    const second = JSON.parse(run(['change', 'new', 'Second no impact', '--quick']).stdout).data.id as string;
+    const secondPath = path.join(dir, '.notchlet', 'changes', second, 'tasks.json');
+    const secondChange = JSON.parse(await readFile(secondPath, 'utf8'));
+    Object.assign(secondChange, {
+      capabilityImpact: 'none', capabilityRationale: 'No durable behavior change.',
+      intent: 'Maintain behavior', outcome: 'Behavior is unchanged',
+      requirements: [{ id: 'REQ-2', title: 'Requirement', description: 'Existing behavior remains.' }],
+      checks: [{ id: 'CHECK-2', description: 'Run acceptance check.' }],
+      tasks: [{ id: 'TASK-2', title: 'Complete work', status: 'completed', dependencies: [], requirementIds: ['REQ-2'] }],
+    });
+    await writeFile(secondPath, JSON.stringify(secondChange, null, 2));
+    assert.equal(run(['change', 'render', second, '--write']).status, 0);
+    await appendEvidence(dir, second, { kind: 'check', outcome: 'passed', summary: 'Acceptance passed', requirementIds: ['REQ-2'], taskIds: ['TASK-2'], checkIds: ['CHECK-2'], provenance: 'recorded' });
+    const human = spawnSync(process.execPath, [cli, 'change', 'close', second], { cwd: dir, encoding: 'utf8' });
+    assert.equal(human.status, 0, `${human.stderr}\n${human.stdout}`);
+    assert.match(human.stdout, /Local closure only; remote delivery is unchanged/);
+    assert.match(human.stdout, /No capability baseline was written/);
+    await assert.rejects(access(path.join(dir, '.notchlet', 'capabilities')));
+
+    const archivedList = JSON.parse(run(['change', 'list', '--archived']).stdout).data;
+    assert.deepEqual(archivedList.changes.map((change: { id: string }) => change.id), [id, second].sort());
+    assert.equal(archivedList.changes.every((change: { archived: boolean; closedAt: string }) => change.archived && Boolean(change.closedAt)), true);
+    const shown = JSON.parse(run(['change', 'show', id]).stdout).data;
+    assert.equal(shown.archived, true);
+    assert.equal(shown.closure.changeId, id);
+    assert.equal(run(['change', 'render', id, '--check']).status, 0);
+    const exported = JSON.parse(run(['change', 'export', id, '--format', 'json']).stdout).data;
+    assert.equal(exported.archived, true);
+    assert.equal(exported.closure.changeId, id);
+    assert.equal(exported.evidence.length, 1);
+    assert.equal(JSON.parse(exported.contents['proposal.json']).change.id, id);
+    const archivedEdit = run(['change', 'update', id, '--intent', 'Changed while archived']);
+    assert.notEqual(archivedEdit.status, 0);
+    assert.equal(JSON.parse(archivedEdit.stdout).error.code, 'archived_change');
+
+    const restored = run(['change', 'restore', id]);
+    assert.equal(restored.status, 0, `${restored.stderr}\n${restored.stdout}`);
+    assert.equal(JSON.parse(restored.stdout).data.id, id);
+    assert.deepEqual(JSON.parse(run(['change', 'list', '--archived']).stdout).data.changes.map((change: { id: string }) => change.id), [second]);
+    assert.equal(JSON.parse(run(['change', 'show', id]).stdout).data.archived, false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('non-Git standard change stays blocked until baseline and delta are authored through the CLI', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'notchlet-capability-loop-'));
+  const cli = process.env.NOTCHLET_PACKED_CLI_PATH ?? path.resolve('dist/cli.js');
+  const run = (args: string[]) => spawnSync(process.execPath, [cli, ...args, '--json'], { cwd: dir, encoding: 'utf8' });
+  try {
+    assert.equal(run(['init']).status, 0);
+    const created = run(['change', 'new', 'Capability loop']);
+    assert.equal(created.status, 0, created.stderr);
+    const id = JSON.parse(created.stdout).data.id as string;
+    const statePath = path.join(dir, '.notchlet', 'changes', id, 'tasks.json');
+    const requirement = { id: 'REQ-LOOP', title: 'Loop behavior', description: 'Durable behavior added by the change.' };
+    const acceptanceScenario = { id: 'SCENARIO-LOOP', requirementId: 'REQ-LOOP', when: 'The loop runs', then: 'The behavior is available.' };
+    const change = JSON.parse(await readFile(statePath, 'utf8'));
+    Object.assign(change, {
+      capabilityImpact: 'delta', capabilityRationale: 'Adds durable capability behavior.',
+      intent: 'Add behavior', outcome: 'Behavior is available', revision: 1,
+      requirements: [requirement], acceptanceScenarios: [acceptanceScenario],
+      designDecisions: [{ id: 'DECISION-1', decision: 'Author the delta explicitly', rationale: 'Closure compares stored delta content.' }],
+      checks: [{ id: 'CHECK-1', description: 'Run acceptance check.' }],
+      tasks: [{ id: 'TASK-1', title: 'Complete work', status: 'completed', dependencies: [], requirementIds: ['REQ-LOOP'] }],
+    });
+    await writeFile(statePath, JSON.stringify(change, null, 2));
+    await writeFile(path.join(dir, '.notchlet', 'changes', id, 'design.md'), '# Design\n\nAuthor the new behavior and verify it with the declared check.\n');
+
+    const before = await readFile(statePath, 'utf8');
+    const missingBaseline = run(['change', 'close', id, '--preview']);
+    assert.equal(missingBaseline.status, 0, missingBaseline.stderr);
+    assert.equal(missingBaseline.stdout.includes('baseline_revision_missing'), true);
+    assert.equal(await readFile(statePath, 'utf8'), before, 'preview must not change files');
+
+    const captured = spawnSync(process.execPath, [cli, 'change', 'baseline', id, '--capability', 'loop-capability', '--revision', '1'], { cwd: dir, encoding: 'utf8' });
+    assert.equal(captured.status, 0, `${captured.stderr}\n${captured.stdout}`);
+    assert.match(captured.stdout, /Captured baseline loop-capability at revision 0/);
+    const capturedState = JSON.parse(await readFile(statePath, 'utf8'));
+    assert.equal(capturedState.revision, 2);
+    assert.equal(capturedState.baselineRevision, 0);
+
+    const staleCapture = run(['change', 'baseline', id, '--capability-name', 'loop-capability', '--revision', '1']);
+    assert.equal(staleCapture.status, 1);
+    assert.equal(JSON.parse(staleCapture.stdout).error.code, 'revision_conflict');
+    assert.equal(JSON.parse(await readFile(statePath, 'utf8')).revision, 2);
+
+    const undeclared = run(['change', 'close', id, '--preview']);
+    assert.equal(undeclared.stdout.includes('capability_delta_required'), true);
+    assert.equal(undeclared.stdout.includes('undeclared_capability_delta'), true);
+
+    const added = run(['change', 'delta', id, 'add', '--requirement', 'REQ-LOOP', '--rationale', 'Accept the new behavior.', '--revision', '2']);
+    assert.equal(added.status, 0, `${added.stderr}\n${added.stdout}`);
+    assert.equal(JSON.parse(added.stdout).data.revision, 3);
+    const operation = JSON.parse(added.stdout).data.capabilityDelta.operations[0];
+    assert.deepEqual(operation.requirement, requirement);
+    assert.deepEqual(operation.scenarios, [acceptanceScenario]);
+    const duplicate = run(['change', 'delta', id, 'add', '--requirement', 'REQ-LOOP', '--rationale', 'Duplicate.']);
+    assert.equal(duplicate.status, 1);
+    assert.equal(JSON.parse(duplicate.stdout).error.code, 'duplicate_delta_operation');
+
+    const deleted = run(['change', 'delta', id, 'delete', '--requirement', 'REQ-LOOP', '--revision', '3']);
+    assert.equal(deleted.status, 0, `${deleted.stderr}\n${deleted.stdout}`);
+    assert.deepEqual(JSON.parse(deleted.stdout).data.capabilityDelta.operations, []);
+    const restored = run(['change', 'delta', id, 'add', '--requirement', 'REQ-LOOP', '--rationale', 'Accept the new behavior.', '--revision', '4']);
+    assert.equal(restored.status, 0, `${restored.stderr}\n${restored.stdout}`);
+
+    const rendered = run(['change', 'render', id, '--write']);
+    assert.equal(rendered.status, 0, rendered.stderr);
+    await appendEvidence(dir, id, { kind: 'check', outcome: 'passed', summary: 'Acceptance passed', requirementIds: ['REQ-LOOP'], taskIds: ['TASK-1'], checkIds: ['CHECK-1'], provenance: 'recorded' });
+    const status = run(['status', id]);
+    assert.equal(status.status, 0, status.stderr);
+    assert.deepEqual(JSON.parse(status.stdout).data.facets.verification.current, ['CHECK-1']);
+    assert.deepEqual(JSON.parse(status.stdout).data.facets.verification.unknown, []);
+    const ready = run(['change', 'close', id, '--preview']);
+    assert.equal(ready.status, 0, ready.stderr);
+    const readyData = JSON.parse(ready.stdout).data;
+    assert.equal(readyData.contribution, 'delta');
+    assert.deepEqual(readyData.blockers, []);
+    assert.equal(readyData.verification.basis, 'artifact');
+    assert.equal(readyData.additions[0].id, 'REQ-LOOP');
+
+    const closed = run(['change', 'close', id, '--baseline-revision', '0']);
+    assert.equal(closed.status, 0, `${closed.stderr}\n${closed.stdout}`);
+    assert.equal(JSON.parse(closed.stdout).data.baselineRevision, 1);
+    const baseline = JSON.parse(await readFile(path.join(dir, '.notchlet', 'capabilities', 'loop-capability.yaml'), 'utf8'));
+    assert.equal(baseline.revision, 1);
+    assert.equal(baseline.requirements[0].value.id, 'REQ-LOOP');
+    assert.equal(baseline.requirements[0].provenance.changeId, id);
     await access(path.join(dir, '.notchlet', 'archive', id, 'tasks.json'));
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
@@ -266,6 +482,111 @@ test('evidence record CLI accepts file-based checkIds without executing descript
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test('scoped evidence records only linked work, warns or blocks task completion, and reports recovery', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'notchlet-cli-evidence-integrity-'));
+  const cli = process.env.NOTCHLET_PACKED_CLI_PATH ?? path.resolve('dist/cli.js');
+  const run = (args: string[]) => spawnSync(process.execPath, [cli, ...args], { cwd: dir, encoding: 'utf8', timeout: 15000 });
+  try {
+    assert.equal(run(['init', '--local']).status, 0);
+    const created = run(['change', 'new', 'Evidence integrity', '--quick', '--json']);
+    assert.equal(created.status, 0, created.stderr);
+    const id = JSON.parse(created.stdout).data.id as string;
+
+    for (const requirement of ['REQ-1', 'REQ-2']) assert.equal(run(['change', 'add', id, 'requirement', '--id', requirement, '--title', requirement, '--description', `Behavior ${requirement}`, '--json']).status, 0);
+    for (const [task, requirement] of [['TASK-1', 'REQ-1'], ['TASK-2', 'REQ-2']]) assert.equal(run(['change', 'add', id, 'task', '--id', task, '--title', task, '--requirement', requirement, '--json']).status, 0);
+    const rejected = run(['change', 'add', id, 'check', '--id', 'CHECK-BAD', '--description', 'Bad link', '--requirement', 'REQ-9', '--json']);
+    assert.notEqual(rejected.status, 0);
+    assert.equal(JSON.parse(rejected.stdout).error.code, 'unknown_requirement');
+    for (const [check, requirement, task] of [['CHECK-1', 'REQ-1', 'TASK-1'], ['CHECK-2', 'REQ-2', 'TASK-2']]) {
+      const added = run(['change', 'add', id, 'check', '--id', check, '--description', `Run ${check}`, '--command', 'node --version', '--requirement', requirement, '--task', task, '--json']);
+      assert.equal(added.status, 0, added.stderr);
+    }
+    assert.match(run(['change', 'show', id]).stdout, /verifies requirements REQ-1; tasks TASK-1/);
+    const shown = JSON.parse(run(['change', 'show', id, '--json']).stdout).data.change;
+    assert.deepEqual(shown.checks.find((check: any) => check.id === 'CHECK-1').requirementIds, ['REQ-1']);
+    assert.deepEqual(shown.checks.find((check: any) => check.id === 'CHECK-1').taskIds, ['TASK-1']);
+
+    const usage = run(['verify', id, '--requirement', 'REQ-1', '--json']);
+    assert.notEqual(usage.status, 0);
+    assert.equal(JSON.parse(usage.stdout).error.code, 'usage_error');
+    assert.match(JSON.parse(usage.stdout).error.message, /require --record/);
+
+    const scoped = run(['verify', id, '--check', 'CHECK-1', '--record', '--json']);
+    assert.equal(scoped.status, 0, scoped.stderr);
+    const scopedEvidence = JSON.parse(scoped.stdout).data.evidence;
+    assert.deepEqual(scopedEvidence.checkIds, ['CHECK-1']);
+    assert.deepEqual(scopedEvidence.requirementIds, ['REQ-1']);
+    assert.deepEqual(scopedEvidence.taskIds, ['TASK-1']);
+    assert.match(scopedEvidence.logPath, /^evidence\/logs\/[^/]+\.json$/);
+    assert.match(scopedEvidence.logHash, /^[0-9a-f]{64}$/);
+    assert.ok(scopedEvidence.logBytes > 0);
+    await access(path.join(dir, '.notchlet', 'changes', id, scopedEvidence.logPath));
+
+    const explicit = run(['verify', id, '--check', 'CHECK-2', '--record', '--requirement', 'REQ-1', '--json']);
+    assert.equal(explicit.status, 0, explicit.stderr);
+    const explicitEvidence = JSON.parse(explicit.stdout).data.evidence;
+    assert.deepEqual(explicitEvidence.checkIds, ['CHECK-2']);
+    assert.deepEqual(explicitEvidence.requirementIds, ['REQ-2', 'REQ-1']);
+    assert.deepEqual(explicitEvidence.taskIds, ['TASK-2']);
+
+    const revised = run(['change', 'update', id, 'requirement', 'REQ-1', '--description', 'Revised behavior REQ-1', '--json']);
+    assert.equal(revised.status, 0, revised.stderr);
+
+    assert.equal(run(['task', 'start', 'TASK-2', '--change', id, '--json']).status, 0);
+    const warned = run(['task', 'complete', 'TASK-2', '--change', id, '--json']);
+    assert.equal(warned.status, 0, warned.stderr);
+    const warnedEnvelope = JSON.parse(warned.stdout);
+    assert.equal(warnedEnvelope.data.tasks.find((task: any) => task.id === 'TASK-2').status, 'completed');
+    assert.equal(warnedEnvelope.warnings[0].code, 'evidence_missing');
+    assert.equal(warnedEnvelope.warnings[0].evidenceStatus, 'stale');
+    assert.match(warnedEnvelope.warnings[0].recovery, /--task TASK-2/);
+
+    assert.equal(run(['task', 'start', 'TASK-1', '--change', id, '--json']).status, 0);
+    const humanWarned = run(['task', 'complete', 'TASK-1', '--change', id]);
+    assert.equal(humanWarned.status, 0, humanWarned.stderr);
+    assert.match(humanWarned.stdout, /evidence_missing/);
+    assert.match(humanWarned.stdout, /Recovery[^\n]*notchlet verify/);
+
+    assert.equal(run(['task', 'start', 'TASK-1', '--change', id, '--json']).status, 0);
+    const tasksFile = path.join(dir, '.notchlet', 'changes', id, 'tasks.json');
+    const beforeStrict = JSON.parse(await readFile(tasksFile, 'utf8'));
+    const strict = run(['task', 'complete', 'TASK-1', '--change', id, '--require-evidence', '--json']);
+    assert.notEqual(strict.status, 0);
+    const strictEnvelope = JSON.parse(strict.stdout);
+    assert.equal(strictEnvelope.error.code, 'evidence_required');
+    assert.match(strictEnvelope.error.recovery, /--task TASK-1/);
+    const afterStrict = JSON.parse(await readFile(tasksFile, 'utf8'));
+    assert.equal(afterStrict.revision, beforeStrict.revision);
+    assert.equal(afterStrict.tasks.find((task: any) => task.id === 'TASK-1').status, 'in_progress');
+
+    const filtered = (args: string[]) => JSON.parse(run(['evidence', 'list', '--change', id, ...args, '--json']).stdout).data.evidence;
+    assert.equal(filtered(['--check', 'CHECK-1']).length, 1);
+    assert.equal(filtered(['--requirement', 'REQ-1']).length, 2);
+    assert.equal(filtered(['--task', 'TASK-1']).length, 1);
+    assert.equal(filtered(['--task', 'TASK-2']).length, 1);
+    assert.equal(filtered(['--failed']).length, 0);
+    assert.equal(filtered(['--stale']).length, 2);
+    const humanEvidence = run(['evidence', 'list', '--change', id]);
+    assert.match(humanEvidence.stdout, /Freshness/);
+    assert.match(humanEvidence.stdout, /Recovery for/);
+
+    const status = JSON.parse(run(['status', id, '--json']).stdout).data;
+    assert.match(status.recovery, new RegExp(`notchlet verify ${id} --check`));
+    assert.match(run(['status', id]).stdout, /Recovery/);
+
+    const preview = JSON.parse(run(['change', 'close', id, '--preview', '--json']).stdout).data;
+    assert.match(preview.verification.recovery, new RegExp(`notchlet verify ${id} --check`));
+    assert.match(run(['change', 'close', id, '--preview']).stdout, /Verification recovery/);
+
+    assert.equal(run(['change', 'add', id, 'check', '--id', 'CHECK-FAIL', '--description', 'Always fails', '--command', 'node -e "process.exit(1)"', '--requirement', 'REQ-2', '--task', 'TASK-2', '--json']).status, 0);
+    const failed = run(['verify', id, '--check', 'CHECK-FAIL', '--record', '--json']);
+    assert.equal(failed.status, 1);
+    assert.match(JSON.parse(failed.stdout).data.recovery, /notchlet verify .* --check CHECK-FAIL --record/);
+    assert.equal(filtered(['--failed']).length, 1);
+    assert.match(run(['verify', id, '--check', 'CHECK-FAIL']).stdout, /Recovery[^\n]*notchlet verify/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('profile use selects a server from NOTCHLET_CONFIG_DIR without exposing credentials or removing other profiles', async () => {
   const parent = await mkdtemp(path.join(os.tmpdir(), 'notchlet profile use '));
   const config = path.join(parent, 'user config'), cli = process.env.NOTCHLET_PACKED_CLI_PATH ?? path.resolve('dist/cli.js');
@@ -299,6 +620,60 @@ test('profile use selects a server from NOTCHLET_CONFIG_DIR without exposing cre
     if (oldToken === undefined) delete process.env.NOTCHLET_TOKEN; else process.env.NOTCHLET_TOKEN = oldToken;
     await rm(parent, { recursive: true, force: true });
   }
+});
+
+test('change new --from previews and imports a declarative plan with one revision bump', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'notchlet-cli-plan-'));
+  const cli = process.env.NOTCHLET_PACKED_CLI_PATH ?? path.resolve('dist/cli.js');
+  const run = (args: string[]) => spawnSync(process.execPath, [cli, ...args, '--json'], { cwd: dir, encoding: 'utf8', timeout: 10000 });
+  try {
+    assert.equal(run(['init']).status, 0);
+    const planPath = path.join(dir, 'plan.json');
+    await writeFile(planPath, JSON.stringify({
+      name: 'Planned Notes', mode: 'quick',
+      intent: 'Create a notes change from a declarative plan.',
+      outcome: 'All authored fields import in a single revision.',
+      capabilityImpact: 'none', capabilityRationale: 'No capability contract changes.',
+      requirements: [{ id: 'REQ-1', title: 'Plan import', description: 'Import authored content from JSON.' }],
+      acceptanceScenarios: [{ id: 'SCN-1', requirementId: 'REQ-1', when: 'a plan is imported', then: 'the change is ready' }],
+      checks: [{ id: 'CHK-1', description: 'Plan readiness', command: 'node --version', requirementIds: ['REQ-1'], taskIds: ['TASK-2'] }],
+      tasks: [
+        { id: 'TASK-2', title: 'Render artifacts', dependencies: ['TASK-1'], requirementIds: ['REQ-1'] },
+        { id: 'TASK-1', title: 'Author metadata', requirementIds: ['REQ-1'] },
+      ],
+    }, null, 2) + '\n');
+    const dryRun = run(['change', 'new', '--from', planPath, '--dry-run', '--render']);
+    assert.equal(dryRun.status, 0, dryRun.stderr);
+    const preview = JSON.parse(dryRun.stdout).data;
+    assert.equal(preview.dryRun, true);
+    assert.equal(preview.change.id, 'planned-notes');
+    assert.equal(preview.change.revision, 1);
+    assert.equal(preview.readiness.ready, true);
+    assert.equal(preview.contents['proposal.json'].includes('Import authored content from JSON.'), true);
+    assert.deepEqual(JSON.parse(run(['change', 'list']).stdout).data.changes, []);
+
+    const created = run(['change', 'new', '--from', planPath, '--render']);
+    assert.equal(created.status, 0, created.stderr);
+    const change = JSON.parse(created.stdout).data;
+    assert.equal(change.revision, 1);
+    assert.equal(change.contentRevision, 1);
+    assert.deepEqual(change.import.written.sort(), ['proposal.json']);
+    assert.deepEqual(JSON.parse(run(['change', 'show', 'planned-notes']).stdout).data.change.tasks.map((task: { id: string; status: string }) => [task.id, task.status]), [['TASK-2', 'pending'], ['TASK-1', 'pending']]);
+    assert.equal(run(['change', 'render', 'planned-notes', '--check']).status, 0);
+
+    const aliased = run(['change', 'new', 'Different Name', '--from', planPath]);
+    assert.equal(aliased.status, 0, aliased.stderr);
+    const aliasedData = JSON.parse(aliased.stdout).data;
+    assert.equal(aliasedData.id, 'different-name');
+    assert.equal(aliasedData.name, 'Different Name');
+    const duplicate = run(['change', 'new', '--from', planPath, '--render']);
+    assert.equal(duplicate.status, 3);
+    assert.equal(JSON.parse(duplicate.stdout).error.code, 'change_exists');
+    await writeFile(planPath, '{not json');
+    const malformed = run(['change', 'new', '--from', planPath]);
+    assert.equal(malformed.status, 1);
+    assert.equal(JSON.parse(malformed.stdout).error.code, 'malformed_plan');
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('change list/show honor nearest and explicit workspaces and conversion preserves change content', async () => {
@@ -467,6 +842,7 @@ test('packed core and CLI install together and run from an isolated path with sp
   const cliPackage = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const corePackage = path.resolve(cliPackage, '../notchlet-core');
   const cliPackageVersion = JSON.parse(await readFile(path.join(cliPackage, 'package.json'), 'utf8')).version;
+  const corePackageVersion = JSON.parse(await readFile(path.join(corePackage, 'package.json'), 'utf8')).version;
   try {
     const filenames: string[] = [];
     for (const packageDir of [corePackage, cliPackage]) {
@@ -483,7 +859,7 @@ test('packed core and CLI install together and run from an isolated path with sp
     const installedCli = path.join(consumer, 'node_modules', '@notchlet', 'cli', 'dist', 'cli.js');
     const version = spawnSync(process.execPath, [installedCli, '--version', '--json'], { cwd: consumer, encoding: 'utf8' });
     assert.equal(version.status, 0, version.stderr);
-    assert.deepEqual(JSON.parse(version.stdout).data, { version: cliPackageVersion, coreVersion: '0.1.0' });
+    assert.deepEqual(JSON.parse(version.stdout).data, { version: cliPackageVersion, coreVersion: corePackageVersion });
     const status = spawnSync(process.execPath, [installedCli, 'status', '--json'], { cwd: consumer, encoding: 'utf8' });
     assert.equal(status.status, 0, status.stderr);
     assert.equal(JSON.parse(status.stdout).data.workspace, null);
@@ -496,7 +872,7 @@ test('packed core and CLI install together and run from an isolated path with sp
       ? spawnSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/c', 'call', globalBin, '--version', '--json'], { cwd: consumer, encoding: 'utf8' })
       : spawnSync(globalBin, ['--version', '--json'], { cwd: consumer, encoding: 'utf8' });
     assert.equal(globalVersion.status, 0, globalVersion.stderr);
-    assert.deepEqual(JSON.parse(globalVersion.stdout).data, { version: cliPackageVersion, coreVersion: '0.1.0' });
+    assert.deepEqual(JSON.parse(globalVersion.stdout).data, { version: cliPackageVersion, coreVersion: corePackageVersion });
   } finally {
     await rm(consumer, { recursive: true, force: true });
     await rm(packDir, { recursive: true, force: true });
@@ -606,3 +982,136 @@ test('packed installed CLI covers offline route families and refuses interactive
     await rm(config, { recursive: true, force: true });
   }
 });
+
+test('init --local --client installs skills and the offline MCP entry without network access', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'notchlet-local-init-'));
+  const cli = process.env.NOTCHLET_PACKED_CLI_PATH ?? path.resolve('dist/cli.js');
+  try {
+    const result = spawnSync(process.execPath, [cli, 'init', '--local', '--client', 'opencode', '--json'], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    const envelope = JSON.parse(result.stdout);
+    assert.equal(envelope.data.mode, 'local');
+    assert.equal(envelope.data.mcp.status, 'configured');
+    const config = JSON.parse(await readFile(path.join(dir, 'opencode.json'), 'utf8'));
+    assert.deepEqual(config.mcp.notchlet, { type: 'local', command: ['notchlet', 'mcp', 'serve', '--local'] });
+    assert.match(await readFile(path.join(dir, '.opencode', 'skills', 'notchlet-super', 'SKILL.md'), 'utf8'), /notchlet-super/);
+    const status = spawnSync(process.execPath, [cli, 'mcp', 'status', '--json'], { cwd: dir, encoding: 'utf8' });
+    assert.equal(status.status, 0, status.stderr);
+    const report = JSON.parse(status.stdout).data;
+    assert.equal(report.servers[0].server, 'local');
+    assert.equal(report.servers[0].transport, 'local');
+    assert.equal(report.servers[0].clients[0].state, 'configured');
+    const human = spawnSync(process.execPath, [cli, 'mcp', 'status'], { cwd: dir, encoding: 'utf8' });
+    assert.equal(human.status, 0, human.stderr);
+    assert.match(human.stdout, /Transport: local/);
+    assert.match(human.stdout, /OpenCode: configured - opencode\.json/);
+    assert.match(human.stdout, /requires no remote credential/);
+    assert.doesNotMatch(human.stdout, /Credential|Keyring|Account MCP|none recorded/);
+    assert.doesNotMatch(human.stdout, /\x1b\[/);
+    const token = spawnSync(process.execPath, [cli, 'mcp', 'token', '--json'], { cwd: dir, encoding: 'utf8' });
+    assert.notEqual(token.status, 0);
+    assert.match(JSON.parse(token.stdout).error.message, /local-only|No MCP credential/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('piped human output contains no ANSI escapes and JSON inspection reports the scaffolded revision', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'notchlet-cli-piped-'));
+  const cli = process.env.NOTCHLET_PACKED_CLI_PATH ?? path.resolve('dist/cli.js');
+  const plainEnv = { ...process.env };
+  delete plainEnv.NO_COLOR;
+  const run = (args: string[], env: NodeJS.ProcessEnv = plainEnv) => spawnSync(process.execPath, [cli, ...args], { cwd: dir, env, encoding: 'utf8' });
+  try {
+    assert.equal(run(['init']).status, 0);
+    const created = run(['change', 'new', 'Piped Output', '--quick', '--json']);
+    assert.equal(created.status, 0, created.stderr);
+    const id = JSON.parse(created.stdout).data.id as string;
+    const inspected = run(['change', 'show', id, '--json']);
+    assert.equal(inspected.status, 0, inspected.stderr);
+    assert.equal(JSON.parse(inspected.stdout).data.change.revision, 0);
+
+    for (const env of [plainEnv, { ...plainEnv, NO_COLOR: '1' }]) {
+      for (const args of [['status'], ['change', 'list'], ['change', 'show', id], ['status', id]]) {
+        const result = run(args, env);
+        assert.equal(result.status, 0, `${args.join(' ')}\n${result.stderr}`);
+        assert.ok(result.stdout.trim().length > 0);
+        assert.doesNotMatch(result.stdout, /\x1b\[/, args.join(' '));
+        assert.doesNotMatch(result.stderr, /\x1b\[/, args.join(' '));
+      }
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('remote MCP status keeps credential, keyring, and account diagnostics visible', async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'notchlet-cli-remote-status-'));
+  const root = path.join(parent, 'checkout');
+  const config = path.join(parent, 'config');
+  const cli = process.env.NOTCHLET_PACKED_CLI_PATH ?? path.resolve('dist/cli.js');
+  const origin = 'https://remote.example.test';
+  const env: NodeJS.ProcessEnv = { ...process.env, NOTCHLET_CONFIG_DIR: config, NOTCHLET_TOKEN: 'remote-status-token' };
+  delete env.NO_COLOR;
+  try {
+    await mkdir(root, { recursive: true });
+    assert.equal(spawnSync(process.execPath, [cli, 'init'], { cwd: root, env, encoding: 'utf8' }).status, 0);
+    await mkdir(path.join(root, '.notchlet', '.local'), { recursive: true });
+    await writeFile(path.join(root, '.notchlet', '.local', 'mcp.json'), JSON.stringify({
+      schemaVersion: 1,
+      servers: {
+        [origin]: {
+          credential: { key: 'mcp:key', id: 42, name: 'notchlet-opencode', scopes: ['workspace:read'], createdAt: '2026-01-01T00:00:00.000Z' },
+          clients: { opencode: { relativePath: 'opencode.json', serverName: 'notchlet', entryHash: 'unused', configuredAt: '2026-01-01T00:00:00.000Z', transport: 'remote', tokenEnv: 'NOTCHLET_MCP_TOKEN' } },
+        },
+      },
+    }));
+    await writeFile(path.join(root, 'opencode.json'), JSON.stringify({
+      mcp: { notchlet: { type: 'remote', url: `${origin}/mcp`, headers: { Authorization: 'Bearer {env:NOTCHLET_MCP_TOKEN}' } } },
+    }));
+    const key = Buffer.from(origin).toString('base64url');
+    await mkdir(config, { recursive: true });
+    await writeFile(path.join(config, 'profiles.json'), JSON.stringify({
+      schemaVersion: 1,
+      current: key,
+      profiles: { [key]: { origin, serverIdentity: origin, credentialStore: 'file', authMode: 'token' } },
+    }));
+
+    const status = spawnSync(process.execPath, [cli, 'mcp', 'status'], { cwd: root, env, encoding: 'utf8' });
+    assert.equal(status.status, 0, status.stderr);
+    assert.match(status.stdout, new RegExp(`Transport: remote`));
+    assert.match(status.stdout, /Credential: notchlet-opencode \(id 42\)/);
+    assert.match(status.stdout, /Keyring: (missing|present|unavailable)/);
+    assert.match(status.stdout, /Account MCP: (unknown|enabled|disabled)/);
+    assert.doesNotMatch(status.stdout, /requires no remote credential/);
+    assert.doesNotMatch(status.stdout, /\x1b\[/);
+  } finally { await rm(parent, { recursive: true, force: true }); }
+});
+
+test('task complete --all completes dependent tasks under one revision with end-of-change evidence policy', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'notchlet-complete-all-cli-'));
+  const cli = process.env.NOTCHLET_PACKED_CLI_PATH ?? path.resolve('dist/cli.js');
+  const run = (args: string[]) => spawnSync(process.execPath, [cli, ...args, '--json'], { cwd: dir, encoding: 'utf8' });
+  try {
+    assert.equal(run(['init']).status, 0);
+    const created = run(['change', 'new', 'Batch completion', '--quick']);
+    const id = JSON.parse(created.stdout).data.id as string;
+    const statePath = path.join(dir, '.notchlet', 'changes', id, 'tasks.json');
+    const change = JSON.parse(await readFile(statePath, 'utf8'));
+    Object.assign(change, {
+      intent: 'Complete the work', outcome: 'All tasks are complete',
+      capabilityImpact: 'none', capabilityRationale: 'Documentation-only maintenance.',
+      evidencePolicy: 'end-of-change',
+      requirements: [{ id: 'REQ-1', title: 'Requirement', description: 'The behavior remains available.' }],
+      tasks: [
+        { id: 'TASK-2', title: 'Second', status: 'pending', dependencies: ['TASK-1'], requirementIds: ['REQ-1'] },
+        { id: 'TASK-1', title: 'First', status: 'pending', dependencies: [], requirementIds: ['REQ-1'] },
+      ],
+    });
+    await writeFile(statePath, JSON.stringify(change, null, 2));
+    const before = change.revision as number;
+    const completed = run(['task', 'complete', '--all', '--change', id]);
+    assert.equal(completed.status, 0, `${completed.stderr}\n${completed.stdout}`);
+    const data = JSON.parse(completed.stdout).data;
+    assert.deepEqual(data.tasks.map((task: { id: string; status: string }) => [task.id, task.status]), [['TASK-2', 'completed'], ['TASK-1', 'completed']]);
+    assert.equal(data.revision, before + 1);
+    assert.equal((JSON.parse(completed.stdout).warnings ?? []).length, 0);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+

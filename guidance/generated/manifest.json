@@ -1,17 +1,17 @@
 {
   "manifestVersion": 1,
   "source": "skills/notchlet-super/SKILL.md",
-  "sourceVersion": "0.3.1",
-  "sourceSha256": "d07ecbb4b965dfa3c3ba768ab347b4731cdbdd83f6add2dfe95f770f8a2b6cc8",
+  "sourceVersion": "1.0.0",
+  "sourceSha256": "40011190cf1496e21d0bf3289f446f9f6d13f9cfc5051272b5a9cc0e63dd4d45",
   "skillsRepo": "mbintangr/notchlet-skills",
   "skillCount": 8,
   "skills": {
     "notchlet-deliver": {
-      "hash": "b9fa3a7c2ebad964cd7c6c607d952d9069b47d68ae9764b3499eb72fe31120b0",
+      "hash": "41efd85b8981611a492a5fbd7663460f4cddfa9e2e8df2ef9095bc8513774d86",
       "path": "skills/notchlet-deliver/SKILL.md"
     },
     "notchlet-implement": {
-      "hash": "081d7a02c110016fb5713e947c5e99b0f8b5a0a1b3d029b53f7690268a38e35f",
+      "hash": "cf09e0b3b55370f0f6f0996dee5ddbe4dc4391f4a5759767859de8494fc56502",
       "path": "skills/notchlet-implement/SKILL.md"
     },
     "notchlet-init": {
@@ -19,15 +19,15 @@
       "path": "skills/notchlet-init/SKILL.md"
     },
     "notchlet-mcp": {
-      "hash": "ba9cb445200d7d1769f601dc8d0263d89bd4d077bef46e54aaa64318de3e0c76",
+      "hash": "c98af0b1baec49630eb29dff1880f4b624868b54efa082d310a30527a64a3b51",
       "path": "skills/notchlet-mcp/SKILL.md"
     },
     "notchlet-plan": {
-      "hash": "1c9760bb4a2bbf341c5127a2a0c1d31d90527352ada5bd347319e234ea9c9a90",
+      "hash": "4bf9e64f63b2b8941a76e0f8a1846ac055f14e64f23672b5c1af4f9a2a96e479",
       "path": "skills/notchlet-plan/SKILL.md"
     },
     "notchlet-platform": {
-      "hash": "15744d55e691435769cdc0551037aa4d02005df0957d53da29ede9afdf8cd247",
+      "hash": "4af5d9d93d3b294f7302fe1ac53670089cb532f5aea7a44a850ff2dd33b494ed",
       "path": "skills/notchlet-platform/SKILL.md"
     },
     "notchlet-review": {
@@ -35,7 +35,7 @@
       "path": "skills/notchlet-review/SKILL.md"
     },
     "notchlet-super": {
-      "hash": "d07ecbb4b965dfa3c3ba768ab347b4731cdbdd83f6add2dfe95f770f8a2b6cc8",
+      "hash": "40011190cf1496e21d0bf3289f446f9f6d13f9cfc5051272b5a9cc0e63dd4d45",
       "path": "skills/notchlet-super/SKILL.md"
     }
   },
@@ -43,13 +43,13 @@
     {
       "client": "opencode",
       "path": "guidance/generated/opencode/notchlet-deliver/SKILL.md",
-      "sha256": "b9fa3a7c2ebad964cd7c6c607d952d9069b47d68ae9764b3499eb72fe31120b0",
+      "sha256": "41efd85b8981611a492a5fbd7663460f4cddfa9e2e8df2ef9095bc8513774d86",
       "skill": "notchlet-deliver"
     },
     {
       "client": "opencode",
       "path": "guidance/generated/opencode/notchlet-implement/SKILL.md",
-      "sha256": "081d7a02c110016fb5713e947c5e99b0f8b5a0a1b3d029b53f7690268a38e35f",
+      "sha256": "cf09e0b3b55370f0f6f0996dee5ddbe4dc4391f4a5759767859de8494fc56502",
       "skill": "notchlet-implement"
     },
     {
@@ -61,19 +61,19 @@
     {
       "client": "opencode",
       "path": "guidance/generated/opencode/notchlet-mcp/SKILL.md",
-      "sha256": "ba9cb445200d7d1769f601dc8d0263d89bd4d077bef46e54aaa64318de3e0c76",
+      "sha256": "c98af0b1baec49630eb29dff1880f4b624868b54efa082d310a30527a64a3b51",
       "skill": "notchlet-mcp"
     },
     {
       "client": "opencode",
       "path": "guidance/generated/opencode/notchlet-plan/SKILL.md",
-      "sha256": "1c9760bb4a2bbf341c5127a2a0c1d31d90527352ada5bd347319e234ea9c9a90",
+      "sha256": "4bf9e64f63b2b8941a76e0f8a1846ac055f14e64f23672b5c1af4f9a2a96e479",
       "skill": "notchlet-plan"
     },
     {
       "client": "opencode",
       "path": "guidance/generated/opencode/notchlet-platform/SKILL.md",
-      "sha256": "15744d55e691435769cdc0551037aa4d02005df0957d53da29ede9afdf8cd247",
+      "sha256": "4af5d9d93d3b294f7302fe1ac53670089cb532f5aea7a44a850ff2dd33b494ed",
       "skill": "notchlet-platform"
     },
     {
@@ -85,19 +85,19 @@
     {
       "client": "opencode",
       "path": "guidance/generated/opencode/notchlet-super/SKILL.md",
-      "sha256": "d07ecbb4b965dfa3c3ba768ab347b4731cdbdd83f6add2dfe95f770f8a2b6cc8",
+      "sha256": "40011190cf1496e21d0bf3289f446f9f6d13f9cfc5051272b5a9cc0e63dd4d45",
       "skill": "notchlet-super"
     },
     {
       "client": "claude-code",
       "path": "guidance/generated/claude-code/notchlet-deliver/SKILL.md",
-      "sha256": "b9fa3a7c2ebad964cd7c6c607d952d9069b47d68ae9764b3499eb72fe31120b0",
+      "sha256": "41efd85b8981611a492a5fbd7663460f4cddfa9e2e8df2ef9095bc8513774d86",
       "skill": "notchlet-deliver"
     },
     {
       "client": "claude-code",
       "path": "guidance/generated/claude-code/notchlet-implement/SKILL.md",
-      "sha256": "081d7a02c110016fb5713e947c5e99b0f8b5a0a1b3d029b53f7690268a38e35f",
+      "sha256": "cf09e0b3b55370f0f6f0996dee5ddbe4dc4391f4a5759767859de8494fc56502",
       "skill": "notchlet-implement"
     },
     {
@@ -109,19 +109,19 @@
     {
       "client": "claude-code",
       "path": "guidance/generated/claude-code/notchlet-mcp/SKILL.md",
-      "sha256": "ba9cb445200d7d1769f601dc8d0263d89bd4d077bef46e54aaa64318de3e0c76",
+      "sha256": "c98af0b1baec49630eb29dff1880f4b624868b54efa082d310a30527a64a3b51",
       "skill": "notchlet-mcp"
     },
     {
       "client": "claude-code",
       "path": "guidance/generated/claude-code/notchlet-plan/SKILL.md",
-      "sha256": "1c9760bb4a2bbf341c5127a2a0c1d31d90527352ada5bd347319e234ea9c9a90",
+      "sha256": "4bf9e64f63b2b8941a76e0f8a1846ac055f14e64f23672b5c1af4f9a2a96e479",
       "skill": "notchlet-plan"
     },
     {
       "client": "claude-code",
       "path": "guidance/generated/claude-code/notchlet-platform/SKILL.md",
-      "sha256": "15744d55e691435769cdc0551037aa4d02005df0957d53da29ede9afdf8cd247",
+      "sha256": "4af5d9d93d3b294f7302fe1ac53670089cb532f5aea7a44a850ff2dd33b494ed",
       "skill": "notchlet-platform"
     },
     {
@@ -133,7 +133,55 @@
     {
       "client": "claude-code",
       "path": "guidance/generated/claude-code/notchlet-super/SKILL.md",
-      "sha256": "d07ecbb4b965dfa3c3ba768ab347b4731cdbdd83f6add2dfe95f770f8a2b6cc8",
+      "sha256": "40011190cf1496e21d0bf3289f446f9f6d13f9cfc5051272b5a9cc0e63dd4d45",
+      "skill": "notchlet-super"
+    },
+    {
+      "client": "agent",
+      "path": "guidance/generated/agent/notchlet-deliver/SKILL.md",
+      "sha256": "41efd85b8981611a492a5fbd7663460f4cddfa9e2e8df2ef9095bc8513774d86",
+      "skill": "notchlet-deliver"
+    },
+    {
+      "client": "agent",
+      "path": "guidance/generated/agent/notchlet-implement/SKILL.md",
+      "sha256": "cf09e0b3b55370f0f6f0996dee5ddbe4dc4391f4a5759767859de8494fc56502",
+      "skill": "notchlet-implement"
+    },
+    {
+      "client": "agent",
+      "path": "guidance/generated/agent/notchlet-init/SKILL.md",
+      "sha256": "4e78b6c4189eaa21909f31f39235b518a0cab5b0a872feb8b9c2dfa1a179928f",
+      "skill": "notchlet-init"
+    },
+    {
+      "client": "agent",
+      "path": "guidance/generated/agent/notchlet-mcp/SKILL.md",
+      "sha256": "c98af0b1baec49630eb29dff1880f4b624868b54efa082d310a30527a64a3b51",
+      "skill": "notchlet-mcp"
+    },
+    {
+      "client": "agent",
+      "path": "guidance/generated/agent/notchlet-plan/SKILL.md",
+      "sha256": "4bf9e64f63b2b8941a76e0f8a1846ac055f14e64f23672b5c1af4f9a2a96e479",
+      "skill": "notchlet-plan"
+    },
+    {
+      "client": "agent",
+      "path": "guidance/generated/agent/notchlet-platform/SKILL.md",
+      "sha256": "4af5d9d93d3b294f7302fe1ac53670089cb532f5aea7a44a850ff2dd33b494ed",
+      "skill": "notchlet-platform"
+    },
+    {
+      "client": "agent",
+      "path": "guidance/generated/agent/notchlet-review/SKILL.md",
+      "sha256": "494ac24ab377611c934a14dc6530ac3b4433ea2ad3f569e6be0c1a90e81a336b",
+      "skill": "notchlet-review"
+    },
+    {
+      "client": "agent",
+      "path": "guidance/generated/agent/notchlet-super/SKILL.md",
+      "sha256": "40011190cf1496e21d0bf3289f446f9f6d13f9cfc5051272b5a9cc0e63dd4d45",
       "skill": "notchlet-super"
     }
   ]

@@ -1,6 +1,6 @@
 import { normalizeOrigin, osCredentialStore, type CredentialStore } from './auth.js';
 import type { Fetcher } from './integration.js';
-import { mergeMcpProjectConfig, removeMcpProjectConfig, inspectMcpProjectConfig, type McpClient } from './mcp-config.js';
+import { DEFAULT_MCP_TOKEN_ENV, mergeMcpProjectConfig, removeMcpProjectConfig, inspectMcpProjectConfig, type McpClient, type McpTransport } from './mcp-config.js';
 import { mcpScopePresetScopes, credentialName, mcpManagement, type McpScopePreset } from './mcp-management.js';
 import { mcpCredentialKey, mcpWorkspaceId, readMcpState, writeMcpState, type McpCredentialMetadata, type McpWorkspaceState } from './mcp-state.js';
 import { redactMcpText } from './mcp-bridge.js';
@@ -10,12 +10,14 @@ export type McpSetupStatus = 'configured' | 'configured-unverified' | 'conflict'
 export type McpSetupResult = {
   status: McpSetupStatus;
   client: McpClient;
+  transport: McpTransport;
   credentialName?: string;
   credentialId?: number;
   scopes?: string[];
   scopePreset?: McpScopePreset;
   configPath?: string;
   toolCount?: number;
+  tokenEnv?: string;
   message?: string;
 };
 
@@ -27,6 +29,10 @@ export type SetupMcpOptions = {
   loadStore?: () => Promise<CredentialStore>;
   fetch?: Fetcher;
   allowFileStore?: boolean;
+  /** Stdio bridge (default), direct remote HTTP, or offline local server. */
+  transport?: McpTransport;
+  /** Environment variable referenced by a remote entry. */
+  tokenEnv?: string;
   /** Least-privilege `recommended` (default) or the explicit `broader` opt-in. */
   scopePreset?: McpScopePreset;
   confirmEnable: (message: string) => Promise<boolean>;
@@ -50,20 +56,22 @@ export async function setupMcpAccess(options: SetupMcpOptions): Promise<McpSetup
   const origin = normalizeOrigin(options.server);
   const root = options.root;
   const client = options.client;
+  const transport = options.transport ?? 'bridge';
+  const tokenEnv = options.tokenEnv ?? DEFAULT_MCP_TOKEN_ENV;
   const scopePreset = options.scopePreset ?? 'recommended';
   const requestedScopes = mcpScopePresetScopes(scopePreset);
   const state = await readMcpState(root);
   const existing = state.servers[origin];
   const managedEntryHash = existing?.clients[client]?.entryHash;
 
-  const preview = await mergeMcpProjectConfig(root, client, origin, { managedEntryHash });
-  if (preview.action === 'conflict') return { status: 'conflict', client, configPath: preview.relativePath, message: preview.reason };
+  const preview = await mergeMcpProjectConfig(root, client, origin, { managedEntryHash, transport, tokenEnv });
+  if (preview.action === 'conflict') return { status: 'conflict', client, transport, configPath: preview.relativePath, message: preview.reason };
 
   const api = await mcpManagement(origin, { fetch: options.fetch, store: options.store, loadStore: options.loadStore, allowFileStore: options.allowFileStore });
   const settings = await api.getSettings();
   if (!settings.enabled) {
     const approved = await options.confirmEnable('Notchlet MCP access is disabled for this account. Enabling it is account-wide and allows authenticated MCP clients to reach Notchlet.');
-    if (!approved) return { status: 'declined', client, message: 'MCP setup was skipped; the account MCP setting and project configuration were not changed.' };
+    if (!approved) return { status: 'declined', client, transport, message: 'MCP setup was skipped; the account MCP setting and project configuration were not changed.' };
     await api.setEnabled(true);
   }
 
@@ -82,10 +90,12 @@ export async function setupMcpAccess(options: SetupMcpOptions): Promise<McpSetup
     const previous = existing?.credential;
     if (previous?.id && previous.id !== created.id) await api.revokeCredential(previous.id).catch(() => undefined);
     credential = { key, id: created.id, name: created.name, scopes: Array.isArray(created.scopes) && created.scopes.length ? created.scopes : requestedScopes, createdAt: created.createdAt ?? new Date().toISOString() };
+    secret = created.secret;
   }
+  if (!secret) throw new Error('The MCP credential could not be resolved from the OS credential store. Rerun MCP setup after unlocking it.');
 
-  const applied = await mergeMcpProjectConfig(root, client, origin, { managedEntryHash, apply: true });
-  if (applied.action === 'conflict' || !applied.entryHash) return { status: 'conflict', client, configPath: applied.relativePath, credentialName: credential.name, credentialId: credential.id, scopes: credential.scopes, scopePreset, message: applied.reason };
+  const applied = await mergeMcpProjectConfig(root, client, origin, { managedEntryHash, apply: true, transport, tokenEnv });
+  if (applied.action === 'conflict' || !applied.entryHash) return { status: 'conflict', client, transport, configPath: applied.relativePath, credentialName: credential.name, credentialId: credential.id, scopes: credential.scopes, scopePreset, message: applied.reason };
 
   const nextState: McpWorkspaceState = {
     schemaVersion: 1,
@@ -95,19 +105,45 @@ export async function setupMcpAccess(options: SetupMcpOptions): Promise<McpSetup
         credential,
         clients: {
           ...(existing?.clients ?? {}),
-          [client]: { relativePath: applied.relativePath, serverName: 'notchlet', entryHash: applied.entryHash, configuredAt: new Date().toISOString() },
+          [client]: { relativePath: applied.relativePath, serverName: 'notchlet', entryHash: applied.entryHash, configuredAt: new Date().toISOString(), transport, ...(transport === 'remote' ? { tokenEnv } : {}) },
         },
       },
     },
   };
   await writeMcpState(root, nextState);
 
-  const base = { client, credentialName: credential.name, credentialId: credential.id, scopes: credential.scopes, scopePreset, configPath: applied.relativePath };
+  const base = { client, transport, credentialName: credential.name, credentialId: credential.id, scopes: credential.scopes, scopePreset, configPath: applied.relativePath, ...(transport === 'remote' ? { tokenEnv } : {}) };
   try {
-    const verified = await (options.verify ?? verifyMcpBridge)({ origin, root });
+    const verifier = options.verify ?? (transport === 'remote'
+      ? (input: { origin: string; root: string }) => verifyMcpRemote({ origin: input.origin, secret })
+      : verifyMcpBridge);
+    const verified = await verifier({ origin, root });
     return { ...base, status: 'configured', toolCount: verified.toolCount };
   } catch (error) {
     return { ...base, status: 'configured-unverified', message: redactMcpText(error instanceof Error ? error.message : 'MCP bridge verification failed.') };
+  }
+}
+
+/** Verify a direct remote HTTP entry using the credential created during setup. */
+export async function verifyMcpRemote(input: { origin: string; secret: string; timeoutMs?: number }): Promise<{ toolCount: number; tools: string[] }> {  if (process.env.NOTCHLET_MCP_VERIFY === '0' || process.env.NOTCHLET_MCP_VERIFY === 'off') return { toolCount: 0, tools: [] };
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+  const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
+  const transport = new StreamableHTTPClientTransport(new URL(`${input.origin}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${input.secret}` } } });
+  const client = new Client({ name: 'notchlet-cli-verify', version: '0.1.0' }, { capabilities: {} });
+  const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Remote MCP verification timed out.')), input.timeoutMs ?? 15_000));
+  try {
+    return await Promise.race([
+      (async () => {
+        await client.connect(transport);
+        const listed = await client.listTools();
+        return { toolCount: listed.tools.length, tools: listed.tools.map(tool => tool.name) };
+      })(),
+      timeout,
+    ]);
+  } catch (error) {
+    throw new Error(redactMcpText(error instanceof Error ? error.message : 'Remote MCP verification failed.', input.secret));
+  } finally {
+    await client.close().catch(() => undefined);
   }
 }
 
@@ -152,10 +188,87 @@ export async function verifyMcpBridge(input: { origin: string; root: string; tim
   }
 }
 
+export const LOCAL_MCP_SERVER = 'local';
+
+/** Configure the offline stdio MCP server; no account, credential, or network is involved. */
+export async function setupLocalMcpAccess(input: { root: string; client: McpClient }): Promise<McpSetupResult> {
+  const preview = await mergeMcpProjectConfig(input.root, input.client, LOCAL_MCP_SERVER, { transport: 'local' });
+  if (preview.action === 'conflict') return { status: 'conflict', client: input.client, transport: 'local', configPath: preview.relativePath, message: preview.reason };
+  const applied = await mergeMcpProjectConfig(input.root, input.client, LOCAL_MCP_SERVER, { transport: 'local', apply: true });
+  if (applied.action === 'conflict' || !applied.entryHash) return { status: 'conflict', client: input.client, transport: 'local', configPath: applied.relativePath, message: applied.reason };
+  const state = await readMcpState(input.root);
+  const existing = state.servers[LOCAL_MCP_SERVER];
+  await writeMcpState(input.root, {
+    schemaVersion: 1,
+    servers: {
+      ...state.servers,
+      [LOCAL_MCP_SERVER]: {
+        clients: {
+          ...(existing?.clients ?? {}),
+          [input.client]: { relativePath: applied.relativePath, serverName: 'notchlet', entryHash: applied.entryHash, configuredAt: new Date().toISOString(), transport: 'local' },
+        },
+      },
+    },
+  });
+  const base = { client: input.client, transport: 'local' as const, configPath: applied.relativePath };
+  try {
+    const verified = await verifyMcpLocal({ root: input.root });
+    return { ...base, status: 'configured', toolCount: verified.toolCount };
+  } catch (error) {
+    return { ...base, status: 'configured-unverified', message: redactMcpText(error instanceof Error ? error.message : 'Local MCP verification failed.') };
+  }
+}
+
+export async function verifyMcpLocal(input: { root: string; timeoutMs?: number }): Promise<{ toolCount: number; tools: string[] }> {
+  if (process.env.NOTCHLET_MCP_VERIFY === '0' || process.env.NOTCHLET_MCP_VERIFY === 'off') return { toolCount: 0, tools: [] };
+  const entry = process.argv[1];
+  if (!entry) throw new Error('Could not locate the Notchlet CLI entry point to verify the local MCP server.');
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport, getDefaultEnvironment } = await import('@modelcontextprotocol/sdk/client/stdio.js');
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [entry, 'mcp', 'serve', '--local', '--workspace', input.root],
+    env: { ...getDefaultEnvironment() },
+    cwd: input.root,
+    stderr: 'pipe',
+  });
+  const client = new Client({ name: 'notchlet-cli-verify', version: '0.1.0' }, { capabilities: {} });
+  const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Local MCP verification timed out.')), input.timeoutMs ?? 15_000));
+  try {
+    return await Promise.race([
+      (async () => {
+        await client.connect(transport);
+        const listed = await client.listTools();
+        return { toolCount: listed.tools.length, tools: listed.tools.map(tool => tool.name) };
+      })(),
+      timeout,
+    ]);
+  } finally {
+    await client.close().catch(() => undefined);
+    await transport.close().catch(() => undefined);
+  }
+}
+
+export type TokenResult = { origin: string; credentialName: string; token: string };
+
+/** Explicitly print the stored credential so it can be placed in the client's environment. */
+export async function mcpToken(input: { root: string; server?: string; store?: CredentialStore; loadStore?: () => Promise<CredentialStore> }): Promise<TokenResult> {
+  const state = await readMcpState(input.root);
+  const origin = input.server ? normalizeOrigin(input.server) : Object.keys(state.servers).find(key => state.servers[key].credential);
+  if (!origin) throw new Error('No MCP credential is recorded. Run `notchlet mcp configure` first.');
+  const entry = state.servers[origin];
+  if (!entry?.credential) throw new Error(`The MCP entry for ${origin} is local-only and has no credential.`);
+  const store = await loadStoreOrThrow(input.store, input.loadStore);
+  const token = await store.get(entry.credential.key);
+  if (!token) throw new Error('The stored MCP credential is missing from the OS credential store. Rerun `notchlet mcp configure`.');
+  return { origin, credentialName: entry.credential.name, token };
+}
+
 export type McpStatusReport = {
   root: string | null;
   servers: Array<{
     server: string;
+    transport: McpTransport;
     credential?: { name: string; id?: number; scopes: string[]; keyring: 'present' | 'missing' | 'unavailable' };
     account?: { enabled: boolean | null; error?: string };
     clients: Array<{ client: McpClient; state: 'configured' | 'modified' | 'missing' | 'invalid'; path: string; reason?: string }>;
@@ -174,26 +287,33 @@ export async function mcpStatus(input: { root: string | null; server?: string; c
   for (const origin of origins) {
     const entry = state.servers[origin];
     let account: { enabled: boolean | null; error?: string } | undefined;
-    try {
-      const api = await mcpManagement(origin, { fetch: input.fetch, store: input.store, loadStore: input.loadStore, allowFileStore: input.allowFileStore });
-      account = { enabled: (await api.getSettings()).enabled };
-    } catch (error) {
-      account = { enabled: null, error: redactMcpText(error instanceof Error ? error.message : 'Account MCP status is unavailable.') };
+    if (origin !== LOCAL_MCP_SERVER) {
+      try {
+        const api = await mcpManagement(origin, { fetch: input.fetch, store: input.store, loadStore: input.loadStore, allowFileStore: input.allowFileStore });
+        account = { enabled: (await api.getSettings()).enabled };
+      } catch (error) {
+        account = { enabled: null, error: redactMcpText(error instanceof Error ? error.message : 'Account MCP status is unavailable.') };
+      }
     }
     const clients: McpStatusReport['servers'][number]['clients'] = [];
     const names = new Set<McpClient>();
     for (const name of Object.keys(entry?.clients ?? {}) as McpClient[]) names.add(name);
     if (input.client) names.add(input.client);
+    const defaultTransport: McpTransport = origin === LOCAL_MCP_SERVER ? 'local' : 'bridge';
+    const serverTransport = Object.values(entry?.clients ?? {})[0]?.transport ?? defaultTransport;
     for (const client of names) {
-      const inspected = await inspectMcpProjectConfig(input.root, client, origin);
+      const metadata = entry?.clients[client];
+      const transport = metadata?.transport ?? defaultTransport;
+      const inspected = await inspectMcpProjectConfig(input.root, client, origin, { transport, ...(metadata?.tokenEnv ? { tokenEnv: metadata.tokenEnv } : {}) });
       const clientState = inspected.action === 'unchanged' ? 'configured' : inspected.action === 'conflict' ? (inspected.present ? 'modified' : 'invalid') : 'missing';
       clients.push({ client, state: clientState, path: inspected.relativePath, ...(inspected.reason ? { reason: inspected.reason } : {}) });
     }
     let keyring: 'present' | 'missing' | 'unavailable' = storeError ? 'unavailable' : 'missing';
-    if (store && entry?.credential?.key && await store.get(entry.credential.key).catch(() => undefined)) keyring = 'present';
+    if (origin !== LOCAL_MCP_SERVER && store && entry?.credential?.key && await store.get(entry.credential.key).catch(() => undefined)) keyring = 'present';
     report.servers.push({
       server: origin,
-      ...(entry ? { credential: { name: entry.credential.name, scopes: entry.credential.scopes, ...(entry.credential.id ? { id: entry.credential.id } : {}), keyring } } : {}),
+      transport: serverTransport,
+      ...(entry?.credential ? { credential: { name: entry.credential.name, scopes: entry.credential.scopes, ...(entry.credential.id ? { id: entry.credential.id } : {}), keyring } } : {}),
       ...(account ? { account } : {}),
       clients,
     });
@@ -254,6 +374,7 @@ export async function mcpDisconnect(input: {
   for (const origin of origins) {
     const entry = nextState.servers[origin];
     if (!entry || Object.keys(entry.clients ?? {}).length) continue;
+    if (!entry.credential) { delete nextState.servers[origin]; continue; }
     if (!input.revoke) {
       outcome = { name: entry.credential.name, ...(entry.credential.id ? { id: entry.credential.id } : {}), revoked: false, keyring: 'kept' };
       continue;
@@ -299,13 +420,13 @@ export async function mcpRevoke(input: {
   allowFileStore?: boolean;
 }): Promise<RevokeResult> {
   const state = input.root ? await readMcpState(input.root) : { schemaVersion: 1 as const, servers: {} };
-  const origin = input.server ? normalizeOrigin(input.server) : Object.keys(state.servers)[0];
-  if (!origin) throw new Error('No MCP configuration is recorded. Pass --server and --credential-id, or run MCP setup first.');
+  const origin = input.server ? normalizeOrigin(input.server) : Object.keys(state.servers).find(key => state.servers[key].credential);
+  if (!origin) throw new Error('No MCP credential is recorded. Pass --server and --credential-id, or run MCP setup first.');
   const entry = state.servers[origin];
-  const credentialId = input.credentialId ?? entry?.credential.id;
+  const credentialId = input.credentialId ?? entry?.credential?.id;
   if (!credentialId) throw new Error('No generated MCP credential ID is recorded. Pass --credential-id to revoke one directly.');
   if (!input.yes) {
-    const confirmed = await input.confirm(`Revoke MCP credential ${credentialId}${entry?.credential.name ? ` (${entry.credential.name})` : ''} for ${origin}? This is account-wide for every client using it.`);
+    const confirmed = await input.confirm(`Revoke MCP credential ${credentialId}${entry?.credential?.name ? ` (${entry.credential.name})` : ''} for ${origin}? This is account-wide for every client using it.`);
     if (!confirmed) return { origin, credentialId, revoked: false, keyring: 'kept', message: 'Cancelled; no changes were made.' };
   }
   const api = await mcpManagement(origin, { fetch: input.fetch, store: input.store, loadStore: input.loadStore, allowFileStore: input.allowFileStore });
@@ -316,7 +437,7 @@ export async function mcpRevoke(input: {
     else throw error;
   }
   let keyring: RevokeResult['keyring'] = 'missing';
-  if (entry?.credential.key) {
+  if (entry?.credential?.key) {
     const store = await loadStoreOrThrow(input.store, input.loadStore).catch(() => undefined);
     keyring = store ? await store.delete(entry.credential.key).then(() => 'removed' as const).catch(() => 'kept' as const) : 'kept';
   }
@@ -325,5 +446,5 @@ export async function mcpRevoke(input: {
     delete servers[origin];
     await writeMcpState(input.root, { schemaVersion: 1, servers });
   }
-  return { origin, ...(entry?.credential.name ? { credentialName: entry.credential.name } : {}), credentialId, revoked, keyring, ...(revoked ? {} : { message: 'The credential was already revoked or not found; local secrets were removed.' }) };
+  return { origin, ...(entry?.credential?.name ? { credentialName: entry.credential.name } : {}), credentialId, revoked, keyring, ...(revoked ? {} : { message: 'The credential was already revoked or not found; local secrets were removed.' }) };
 }

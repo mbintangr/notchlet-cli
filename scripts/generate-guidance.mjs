@@ -1,4 +1,4 @@
-import { readFile, readdir, stat, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, readdir, rename, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,7 +17,7 @@ const requiredCommands = [
 ];
 const cliSource = await readFile(path.join(packageRoot, 'src', 'cli.ts'), 'utf8');
 for (const command of requiredCommands) if (!cliSource.includes(command)) throw new Error(`Guidance references an unavailable CLI command: ${command}`);
-for (const syntax of ['sync status|push|pull|resolve --change', 'checkpoint --change', 'evidence record --change', 'instructions <change-name|id> [--action plan|revise|implement|verify|resume]', 'change new <name>', 'change list', 'change show <name|id>', 'change convert <name|id>', 'status [change-name|id]', 'validate <change>', 'task start <task-name|id> --change <name|id> --revision <n>', 'task complete <task-name|id> --change <name|id> --revision <n>', 'backlog import <item-key|title|id>', 'mcp serve --server <url>', 'mcp status [--server <url>]', 'mcp disconnect [--client opencode|claude]', 'mcp revoke [--server <url>]']) {
+for (const syntax of ['sync status|push|pull|resolve --change', 'checkpoint --change', 'evidence record --change', 'instructions <change-name|id> [--action plan|revise|implement|verify|resume]', 'change new <name>', 'change list', 'change show <name|id>', 'change convert <name|id>', 'status [change-name|id]', 'validate <change>', 'task start <task-name|id> --change <name|id> --revision <n>', 'task complete <task-name|id> --change <name|id> --revision <n>', 'backlog import <item-key|title|id>', 'mcp serve --server <url>', 'mcp status [--server <url>]', 'mcp disconnect [--client <agent>]', 'mcp revoke [--server <url>]']) {
   if (!cliSource.includes(syntax)) throw new Error(`Guidance syntax is not present in CLI help: ${syntax}`);
 }
 const mcpSkillSource = await readFile(path.join(skillsSourceDir, 'notchlet-mcp', 'SKILL.md'), 'utf8');
@@ -77,7 +77,7 @@ if (/notchlet-init|curl\s+[^\n]*\/mcp/i.test(source)) throw new Error('Canonical
 if (!/Explore \/ investigate \(read-only\)[\s\S]*?Do not run `notchlet init`/.test(source)) throw new Error('Explore guidance must explicitly be read-only and avoid initialization.');
 if (!/Plan only \(read-only unless asked to persist\)[\s\S]*?does not require initialization, an epic→story→task hierarchy, or application\/change-artifact writes/.test(source)) throw new Error('Planning guidance must be read-only by default and independent of initialization and backlog hierarchy.');
 
-const clients = ['opencode', 'claude-code'];
+const clients = ['opencode', 'claude-code', 'agent'];
 const skillDirs = await readdir(skillsSourceDir);
 const skillEntries = [];
 for (const dir of skillDirs) {
@@ -97,12 +97,31 @@ for (const entry of skillEntries) {
   }
 }
 
+// Concurrent generate-guidance runs (guidance and guidance-install test files) must never expose partial files.
+// Windows can transiently lock the destination while another writer replaces it, so retry the rename.
+async function writeAtomic(target, content) {
+  const temporary = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  await writeFile(temporary, content, 'utf8');
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(temporary, target);
+      return;
+    } catch (error) {
+      if (!['EPERM', 'EBUSY', 'EACCES'].includes(error.code) || attempt >= 20) {
+        await rm(temporary, { force: true }).catch(() => {});
+        throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, 10 * (attempt + 1)));
+    }
+  }
+}
+
 const targets = [];
 for (const client of clients) {
   for (const entry of skillEntries) {
     const target = path.join(packageRoot, 'guidance', 'generated', client, entry.name, 'SKILL.md');
     await mkdir(path.dirname(target), { recursive: true });
-    await writeFile(target, entry.content, 'utf8');
+    await writeAtomic(target, entry.content);
     targets.push({ client, path: path.relative(packageRoot, target).replace(/\\/g, '/'), sha256: entry.hash, skill: entry.name });
   }
 }
@@ -122,6 +141,6 @@ const manifest = {
 };
 const manifestDir = path.join(packageRoot, 'guidance', 'generated');
 await mkdir(manifestDir, { recursive: true });
-await writeFile(path.join(manifestDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-await writeFile(path.join(manifestDir, 'compatibility.json'), `${JSON.stringify({ skills: skillLock.skills, aliases: aliases.aliases, source: aliases.source }, null, 2)}\n`, 'utf8');
+await writeAtomic(path.join(manifestDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+await writeAtomic(path.join(manifestDir, 'compatibility.json'), `${JSON.stringify({ skills: skillLock.skills, aliases: aliases.aliases, source: aliases.source }, null, 2)}\n`);
 console.log(`Synced ${targets.length} skill outputs (${skillEntries.length} skills x ${clients.length} clients) from ${skillsRepoRoot} to guidance/generated/.`);

@@ -43,6 +43,7 @@ export async function resolveMcpCredential(originInput: string, options: BridgeO
   const state = await readMcpState(root);
   const entry = state.servers[origin];
   if (!entry) throw new Error(`No Notchlet MCP credential is configured for ${origin} in this workspace. Run \`notchlet init --interactive\` to configure it.`);
+  if (!entry.credential) throw new Error(`The MCP entry for ${origin} is local-only and has no remote credential. Use \`notchlet mcp serve --local\` instead.`);
   let store: CredentialStore;
   try { store = options.store ?? await (options.loadStore ?? osCredentialStore)(); }
   catch { throw new Error('OS credential store is unavailable or locked, so the MCP credential cannot be read. Rerun `notchlet init --interactive` after unlocking it.'); }

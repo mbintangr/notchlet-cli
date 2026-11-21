@@ -388,3 +388,41 @@ test('revoke deletes the remote credential and local secret and tolerates an alr
     await rm(parent, { recursive: true, force: true });
   }
 });
+
+test('remote transport writes a direct HTTP entry with an environment token reference and records the transport', async () => {
+  const { parent, root } = await tempCheckout();
+  const store = new MemoryStore();
+  const { fetcher } = fakeFetch((url, init) => {
+    if (url.pathname === '/mcp/settings' && (init.method ?? 'GET') === 'GET') return Response.json({ enabled: true });
+    if (url.pathname === '/mcp/settings/credentials' && init.method === 'POST') {
+      const body = JSON.parse(String(init.body));
+      return Response.json({ id: 601, name: body.name, scopes: body.scopes, createdAt: '2026-01-01T00:00:00.000Z', secret: secretValue });
+    }
+    return undefined;
+  });
+  try {
+    await seedAccount(store, root);
+    const result = await setupMcpAccess({
+      root, server: origin, client: 'opencode', transport: 'remote', tokenEnv: 'ACME_MCP_TOKEN',
+      store, fetch: fetcher, confirmEnable: async () => true, verify: async () => ({ toolCount: 9 }),
+    });
+    assert.equal(result.status, 'configured');
+    assert.equal(result.transport, 'remote');
+    assert.equal(result.tokenEnv, 'ACME_MCP_TOKEN');
+    const config = JSON.parse(await readFile(path.join(root, 'opencode.json'), 'utf8'));
+    assert.deepEqual(config.mcp.notchlet, {
+      type: 'remote',
+      url: `${origin}/mcp`,
+      headers: { Authorization: 'Bearer {env:ACME_MCP_TOKEN}' },
+    });
+    assert.doesNotMatch(JSON.stringify(config), new RegExp(secretValue));
+    const state = JSON.parse(await readFile(path.join(root, '.notchlet', '.local', 'mcp.json'), 'utf8'));
+    assert.equal(state.servers[origin].clients.opencode.transport, 'remote');
+    const report = await mcpStatus({ root, store, fetch: fetcher });
+    assert.equal(report.servers[0].transport, 'remote');
+    assert.equal(report.servers[0].clients[0].state, 'configured');
+  } finally {
+    delete process.env.NOTCHLET_CONFIG_DIR;
+    await rm(parent, { recursive: true, force: true });
+  }
+});

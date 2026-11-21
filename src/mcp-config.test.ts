@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { claudeServerEntry, hashMcpEntry, inspectMcpProjectConfig, mergeMcpProjectConfig, openCodeServerEntry, parseJsonc, removeMcpProjectConfig } from './mcp-config.js';
+import { claudeRemoteServerEntry, claudeServerEntry, hashMcpEntry, inspectMcpProjectConfig, mergeMcpProjectConfig, openCodeLocalServerEntry, openCodeRemoteServerEntry, openCodeServerEntry, parseJsonc, removeMcpProjectConfig } from './mcp-config.js';
 
 function runOpenCode(args: string[], options: Parameters<typeof spawnSync>[2] = {}) {
   // Windows resolves the npm `opencode` shim through cmd.exe; the extensionless
@@ -288,5 +288,49 @@ test('generated OpenCode configuration is read by the installed OpenCode client'
     const written = JSON.parse(await readFile(path.join(root, 'opencode.json'), 'utf8'));
     assert.equal(written.mcp.servers.notchlet.enabled, undefined);
     assert.equal(written.mcp.servers.notchlet.disabled, undefined);
+  } finally { await rm(parent, { recursive: true, force: true }); }
+});
+
+test('remote MCP entries use the documented OpenCode shape and an environment token reference', async () => {
+  const { parent, root } = await tempRoot();
+  try {
+    const preview = await mergeMcpProjectConfig(root, 'opencode', 'https://remote.example.test', { transport: 'remote', apply: true });
+    assert.equal(preview.action, 'create');
+    const value = JSON.parse(await readFile(path.join(root, 'opencode.json'), 'utf8'));
+    assert.deepEqual(value.mcp.notchlet, openCodeRemoteServerEntry('https://remote.example.test'));
+    assert.equal(value.mcp.notchlet.type, 'remote');
+    assert.equal(value.mcp.notchlet.url, 'https://remote.example.test/mcp');
+    assert.equal(value.mcp.notchlet.headers.Authorization, 'Bearer {env:NOTCHLET_MCP_TOKEN}');
+    assert.doesNotMatch(JSON.stringify(value), /eyJ[A-Za-z0-9_-]+/);
+
+    const custom = await mergeMcpProjectConfig(root, 'opencode', 'https://remote.example.test', { transport: 'remote', tokenEnv: 'ACME_MCP_TOKEN' });
+    assert.equal(custom.action, 'conflict');
+    const updated = await mergeMcpProjectConfig(root, 'opencode', 'https://remote.example.test', { transport: 'remote', tokenEnv: 'ACME_MCP_TOKEN', managedEntryHash: preview.entryHash, apply: true });
+    assert.equal(updated.action, 'update');
+    const customValue = JSON.parse(await readFile(path.join(root, 'opencode.json'), 'utf8'));
+    assert.equal(customValue.mcp.notchlet.headers.Authorization, 'Bearer {env:ACME_MCP_TOKEN}');
+
+    const inspected = await inspectMcpProjectConfig(root, 'opencode', 'https://remote.example.test', { transport: 'remote', tokenEnv: 'ACME_MCP_TOKEN' });
+    assert.equal(inspected.present, true);
+    assert.equal(inspected.action, 'unchanged');
+  } finally { await rm(parent, { recursive: true, force: true }); }
+});
+
+test('Claude remote entries use streamable HTTP and local entries need no account', async () => {
+  const { parent, root } = await tempRoot();
+  try {
+    await mergeMcpProjectConfig(root, 'claude', 'https://claude-remote.example.test', { transport: 'remote', apply: true });
+    const claude = JSON.parse(await readFile(path.join(root, '.mcp.json'), 'utf8'));
+    assert.deepEqual(claude.mcpServers.notchlet, claudeRemoteServerEntry('https://claude-remote.example.test'));
+    assert.equal(claude.mcpServers.notchlet.type, 'http');
+
+    await mergeMcpProjectConfig(root, 'opencode', 'local', { transport: 'local', apply: true });
+    const opencode = JSON.parse(await readFile(path.join(root, 'opencode.json'), 'utf8'));
+    assert.deepEqual(opencode.mcp.notchlet, openCodeLocalServerEntry());
+    assert.deepEqual(opencode.mcp.notchlet.command, ['notchlet', 'mcp', 'serve', '--local']);
+
+    const removed = await removeMcpProjectConfig(root, 'opencode', { apply: true });
+    assert.equal(removed.action, 'removed');
+    assert.equal(JSON.parse(await readFile(path.join(root, 'opencode.json'), 'utf8')).mcp.notchlet, undefined);
   } finally { await rm(parent, { recursive: true, force: true }); }
 });

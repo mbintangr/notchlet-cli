@@ -3,17 +3,19 @@ import { lstat, mkdir, readFile, rename, rm, writeFile, readdir, stat } from 'no
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export type GuidanceClient = 'opencode' | 'claude';
+export type GuidanceClient = 'opencode' | 'claude' | 'agent';
 type ClientRecord = { target: string; sourceHash: string; installedHash: string; sourceVersion: string };
 type SkillRecord = { target: string; sourceHash: string; installedHash: string; sourceVersion: string };
 type InstallOptions = { apply?: boolean };
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const generatedDir = (client: GuidanceClient) => path.join(packageRoot, 'guidance', 'generated', client === 'claude' ? 'claude-code' : 'opencode');
+const generatedDir = (client: GuidanceClient) => path.join(packageRoot, 'guidance', 'generated', client === 'claude' ? 'claude-code' : client === 'agent' ? 'agent' : 'opencode');
 const targetFor = (client: GuidanceClient, skill: string) => client === 'opencode'
   ? `.opencode/skills/${skill}/SKILL.md`
-  : `.claude/skills/${skill}/SKILL.md`;
+  : client === 'claude'
+  ? `.claude/skills/${skill}/SKILL.md`
+  : `.agents/skills/${skill}/SKILL.md`;
 
 async function lstatOrNull(file: string) {
   try { return await lstat(file); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
@@ -48,7 +50,7 @@ async function atomicWrite(file: string, contents: string) {
 }
 
 export async function installClientGuidance(rootInput: string, client: GuidanceClient, options: InstallOptions = {}) {
-  if (!['opencode', 'claude'].includes(client)) throw new Error('Client must be opencode or claude.');
+  if (!['opencode', 'claude', 'agent'].includes(client)) throw new Error('Client must be opencode, claude, or agent.');
   const root = path.resolve(rootInput);
   const genDir = generatedDir(client);
   const genStat = await lstatOrNull(genDir);

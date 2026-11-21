@@ -68,7 +68,7 @@ async function askYesNo(io: SetupIO, text: string, defaultYes = false): Promise<
   }
 }
 
-export async function interactiveInit(root: string, options: { io?: SetupIO; fetch?: Fetcher; store?: CredentialStore; loadStore?: () => Promise<CredentialStore>; verifyMcp?: (input: { origin: string; root: string }) => Promise<{ toolCount: number }> } = {}): Promise<SetupResult> {
+export async function interactiveInit(root: string, options: { io?: SetupIO; fetch?: Fetcher; store?: CredentialStore; loadStore?: () => Promise<CredentialStore>; verifyMcp?: (input: { origin: string; root: string }) => Promise<{ toolCount: number }>; transport?: 'bridge' | 'remote' } = {}): Promise<SetupResult> {
   const io = options.io ?? terminalSetupIO();
   await initWorkspace(root);
   io.write('Set up this checkout for Notchlet:');
@@ -125,15 +125,16 @@ export async function interactiveInit(root: string, options: { io?: SetupIO; fet
         store: options.store,
         loadStore: options.loadStore,
         verify: options.verifyMcp,
+        transport: options.transport,
         scopePreset,
         confirmEnable: (message) => askYesNo(io, message, false),
       });
-      if (mcp.status === 'configured') io.write(`MCP: configured for ${mcp.client === 'opencode' ? 'OpenCode' : 'Claude Code'}${typeof mcp.toolCount === 'number' && mcp.toolCount > 0 ? ` (${mcp.toolCount} tools verified)` : ''}.`);
+      if (mcp.status === 'configured') io.write(`MCP: configured for ${mcp.client === 'opencode' ? 'OpenCode' : 'Claude Code'}${typeof mcp.toolCount === 'number' && mcp.toolCount > 0 ? ` (${mcp.toolCount} tools verified)` : ''}.${mcp.tokenEnv ? ` Set ${mcp.tokenEnv} in the environment that starts the client.` : ''}`);
       else if (mcp.status === 'configured-unverified') io.write(`MCP: configuration written, but live verification failed. ${mcp.message ?? ''}`.trim());
       else io.write(`MCP: ${mcp.message ?? mcp.status}`);
     } catch (error) {
-      mcp = { status: 'skipped', client: client as McpClient, message: error instanceof Error ? error.message : 'MCP setup failed.' };
-      io.write(`MCP setup skipped: ${mcp.message}`);
+      mcp = { status: 'skipped', client: client as McpClient, transport: options.transport ?? 'bridge', message: error instanceof Error ? error.message : 'MCP setup failed.' };
+      io.write(`MCP setup skipped: ${mcp?.message ?? 'MCP setup failed.'}`);
     }
   }
 
