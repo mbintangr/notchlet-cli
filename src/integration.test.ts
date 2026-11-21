@@ -10,7 +10,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { initWorkspace, scaffold } from '@notchlet/core';
 import { authCommand, resolveCredential, type CredentialStore } from './auth.js';
-import { autoSyncChange, bindWorkspace, callMcpTool, doctor, getWorkspaceSyncMode, importBacklogItem, setWorkspaceSyncMode, syncCheckpoint, syncPull, syncPush, syncResolve, syncStatus } from './integration.js';
+import { autoSyncChange, bindWorkspace, callMcpTool, doctor, getWorkspaceSyncMode, importBacklogItem, linkChange, setWorkspaceSyncMode, syncCheckpoint, syncPull, syncPush, syncResolve, syncStatus } from './integration.js';
 
 function mockDevelopmentServer(state: { capabilities: any; productAccessible?: boolean; repository?: any }) {
   const tools = ['workspace_context', 'product_get_details', 'backlog_list', 'backlog_get', 'backlog_development_context'].map(name => ({ name, description: name, inputSchema: { type: 'object', properties: {} } }));
@@ -319,7 +319,7 @@ const syncCapabilities = {
   server: { id: 'sync-server', version: '1.0.0' }, protocol: { minimum: '1.0', maximum: '1.0' },
   versions: { core: '1.0.0', schema: '1.0.0' },
   limits: { snapshotUploadBytes: 1_048_576, instructionContextBytes: 32768, pageSizeDefault: 20, pageSizeMaximum: 100 },
-  operations: ['createChange', 'uploadSnapshot', 'checkpoint', 'getOperation'],
+  operations: ['createChange', 'uploadSnapshot', 'checkpoint', 'linkChange', 'getOperation'],
 };
 const digest = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 
@@ -355,6 +355,10 @@ async function syncFixture() {
       return Response.json(remote.metadata, { status: 201 });
     }
     if (url.pathname === `/development/v1/changes/${remoteId}` && method === 'GET') return Response.json(remote.metadata);
+    if (url.pathname === `/development/v1/changes/${remoteId}` && method === 'PATCH') {
+      remote.metadata = { ...remote.metadata, ...body };
+      return Response.json(remote.metadata);
+    }
     if (url.pathname === `/development/v1/changes/${remoteId}/snapshots` && method === 'GET') return Response.json({ items: remote.snapshots, nextCursor: null, limit: 20 });
     if (url.pathname === `/development/v1/changes/${remoteId}/snapshots` && method === 'POST') {
       if (remote.uploadStatus !== null) { const status = remote.uploadStatus; remote.uploadStatus = null; return Response.json({ code: 'REVISION_CONFLICT' }, { status }); }
@@ -411,6 +415,24 @@ test('sync preview and first push create one remote change and use distinct idem
     const pushed = JSON.parse(Buffer.from(writes[1].body.content, 'base64').toString());
     assert.deepEqual(Object.keys(pushed).sort(), ['artifacts', 'change', 'evidence']);
     assert.equal((await syncStatus(f.root, change.id, { server: f.server, fetch: f.fetcher })).state, 'unchanged');
+  } finally { await f.dispose(); }
+});
+
+test('sync push sends the imported backlog item and bound repository, and link updates an existing change', async () => {
+  const f = await syncFixture();
+  try {
+    const change = await scaffold(f.root, 'Linked change', 'quick');
+    await mkdir(path.join(f.root, '.notchlet', 'imports'), { recursive: true });
+    await writeFile(path.join(f.root, '.notchlet', 'imports', '1518.json'), JSON.stringify({ server: 'sync-server', productId: 31, itemId: 1518, changeId: change.id }));
+    assert.equal((await syncPush(f.root, change.id, { server: f.server, fetch: f.fetcher, yes: true })).state, 'pushed');
+    const create = f.remote.requests.find(r => r.path === '/development/v1/changes' && r.method === 'POST');
+    assert.equal(create.body.backlogItemId, 1518);
+    assert.equal(create.body.repositoryId, 7);
+    const linked = await linkChange(f.root, change.id, { backlogItemId: 1518, repositoryId: 7 }, { server: f.server, fetch: f.fetcher });
+    assert.equal(linked.state, 'linked');
+    assert.equal(linked.change.backlogItemId, 1518);
+    assert.equal(linked.change.repositoryId, 7);
+    assert.ok(f.remote.requests.some(r => r.path === `/development/v1/changes/${f.remoteId}` && r.method === 'PATCH'));
   } finally { await f.dispose(); }
 });
 

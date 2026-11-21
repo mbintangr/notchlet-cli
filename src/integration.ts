@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, lstat, rename, rm } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, lstat, readdir, rename, rm } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -47,6 +47,20 @@ async function pendingOperation(root: string, id: string, step: string, payloadH
   return saved;
 }
 async function clearPendingOperation(root: string, id: string, step: string) { await rm(operationFile(root, id, step), { force: true }); }
+async function importMarkerForChange(root: string, changeId: string): Promise<{ itemId: number; productId: number } | null> {
+  const dir = path.join(root, '.notchlet', 'imports');
+  let entries: string[];
+  try { entries = await readdir(dir); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+  for (const entry of entries) {
+    if (!entry.endsWith('.json')) continue;
+    try {
+      const marker = JSON.parse(await readFile(path.join(dir, entry), 'utf8'));
+      if (marker?.changeId === changeId && positiveId(Number(marker.itemId))) return { itemId: Number(marker.itemId), productId: Number(marker.productId) };
+    } catch { /* skip unreadable import markers */ }
+  }
+  return null;
+}
 async function reconcileOperation(ctx: Awaited<ReturnType<typeof syncContext>>, operationId: string, payloadHash: string) {
   const response = await remoteJson(ctx, `/operations/${operationId}`);
   if (response.status === 404) return null;
@@ -230,7 +244,14 @@ export async function syncPush(root: string, id: string, options: SyncOptions = 
   const preview = { change: id, remoteId: remoteId ?? null, expectedRevision: revision, payloadHash: hash, bytes: pkg.bytes.byteLength, willCreate: !remoteId };
   if (!options.yes && !options.preview) return { state: 'preview', preview, nextAction: 'Review this package and repeat with --yes to apply.' };
   if (!remoteId) {
-    const body = { productId: ctx.binding.productId, title: pkg.payload.change.name, description: pkg.payload.change.description ?? '' };
+    const marker = await importMarkerForChange(root, id);
+    const body = {
+      productId: ctx.binding.productId,
+      title: pkg.payload.change.name,
+      description: pkg.payload.change.description ?? '',
+      ...(marker && marker.productId === ctx.binding.productId ? { backlogItemId: marker.itemId } : {}),
+      ...(positiveId(Number(ctx.binding.repositoryId)) ? { repositoryId: Number(ctx.binding.repositoryId) } : {}),
+    };
     const bodyHash = sha256(canonical(body));
     const journal = await pendingOperation(root, id, 'create', bodyHash, { method: 'POST', path: '/changes', body, expectedRevision: 0 });
     let created = await reconcileOperation(ctx, journal.operationId, bodyHash);
@@ -354,6 +375,20 @@ export async function syncCheckpoint(root: string, id: string, input: { name: st
   if (!result || result.changeId !== local.remoteId || result.name !== body.name || result.snapshotRevision !== body.snapshotRevision) throw new Error('Reconciled checkpoint result does not match the pending operation.');
   await clearPendingOperation(root, id, 'checkpoint');
   return { state: 'checkpointed', remoteId: local.remoteId, checkpoint: result };
+}
+
+export async function linkChange(root: string, id: string, input: { backlogItemId?: number; repositoryId?: number }, options: SyncOptions = {}) {
+  if (input.backlogItemId === undefined && input.repositoryId === undefined) throw new Error('Provide a backlog item ID, a repository ID, or both.');
+  if (input.backlogItemId !== undefined && !positiveId(input.backlogItemId)) throw new Error('Backlog item ID must be a positive integer.');
+  if (input.repositoryId !== undefined && !positiveId(input.repositoryId)) throw new Error('Repository ID must be a positive integer.');
+  const local = await syncState(root, id);
+  if (!local?.remoteId) throw new Error('Change must be synchronized before linking; run `notchlet sync push` first.');
+  const ctx = await syncContext(root, { ...options, requiredOperations: ['linkChange'] });
+  const body = { ...(input.backlogItemId === undefined ? {} : { backlogItemId: input.backlogItemId }), ...(input.repositoryId === undefined ? {} : { repositoryId: input.repositoryId }) };
+  const response = await remoteJson(ctx, `/changes/${local.remoteId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: canonical(body) });
+  if (response.status === 404) throw new Error('Remote change was not found.');
+  if (!response.ok) throw Object.assign(new Error(`Remote link update failed (HTTP ${response.status}).`), { code: 'remote_write_failed' });
+  return { state: 'linked', remoteId: local.remoteId, change: await response.json() as any };
 }
 
 async function discoverCapabilities(profile: AuthProfile, options: IntegrationOptions = {}): Promise<{ capabilities: Capabilities; diagnostic: string }> {

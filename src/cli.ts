@@ -412,6 +412,7 @@ ${section('Verification')}
 ${section('Other')}
   backlog import <item-key|title|id> [--product-id <id>]     Import a backlog item as a change
   checkpoint --change <name|id> --name <name> [--summary <text>] [--backlog-status TODO|IN_PROGRESS|IN_REVIEW|DONE]   Create a remote checkpoint
+  link --change <name|id> [--backlog-item <id>] [--repository <id>]   Link a synchronized change to a backlog item or repository
   evidence record --change <name|id> [--file <json-path>] [--summary <text>] [--kind <kind>] [--outcome <state>] [--capture-url <url>]   Record evidence
   evidence list --change <name|id> [--check|--requirement|--task <id>] [--stale] [--failed]   List scoped evidence with freshness and recovery
   instructions <change-name|id> [--action plan|revise|implement|verify|resume] Get workflow instructions for a change
@@ -948,6 +949,41 @@ Options:
         lines.push(kv('Snapshot revision', String(c?.snapshotRevision ?? '(unknown)')));
         if (c?.summary) lines.push(kv('Summary', c.summary));
         if (c?.backlogStatus) lines.push(kv('Backlog status', c.backlogStatus));
+        console.log(box(lines));
+      }
+    }
+    else if (command === 'link') {
+      if (args.includes('--help') || args.includes('-h')) {
+        showCommandHelp('link', `notchlet link --change <name|id> [--backlog-item <id>] [--repository <id>]
+
+  Link a synchronized change to a backlog item or repository so the platform Development tab can find it.
+
+Options:
+  --change <name|id>      Change name or ID (required)
+  --backlog-item <id>     Backlog item ID to link
+  --repository <id>       Repository ID to link
+  --server <url>          Notchlet server (default: ${DEFAULT_SERVER})
+  --endpoint <url>        Override MCP endpoint
+  --workspace <root>      Set workspace root
+  --json                  Machine-readable JSON output`);
+      }
+      const root = await requireWorkspace('link');
+      const changeRef = optionValue('--change') ?? (isTty() ? await prompt('Change name or ID: ') : undefined);
+      const backlogItemId = optionValue('--backlog-item') === undefined ? undefined : Number(optionValue('--backlog-item'));
+      const repositoryId = optionValue('--repository') === undefined ? undefined : Number(optionValue('--repository'));
+      const validId = (value: number | undefined) => value === undefined || (Number.isSafeInteger(value) && value > 0);
+      if (!changeRef || (backlogItemId === undefined && repositoryId === undefined) || !validId(backlogItemId) || !validId(repositoryId)) fail('usage_error', usage, 'Provide --change and at least one of --backlog-item or --repository.', 64);
+      const id = await resolveChangeRef(root, changeRef);
+      const { linkChange } = await import('./integration.js');
+      const result = await linkChange(root, id, { ...(backlogItemId === undefined ? {} : { backlogItemId }), ...(repositoryId === undefined ? {} : { repositoryId }) }, { server: optionValue('--server'), endpoint: optionValue('--endpoint') });
+      if (json) { print(result); }
+      else {
+        const lines: string[] = [];
+        lines.push(section('Change linked'));
+        lines.push(kv('Change', id));
+        lines.push(kv('Remote ID', result.remoteId));
+        if (result.change?.backlogItemId !== undefined) lines.push(kv('Backlog item', result.change.backlogItemId == null ? '(none)' : String(result.change.backlogItemId)));
+        if (result.change?.repositoryId !== undefined) lines.push(kv('Repository', result.change.repositoryId == null ? '(none)' : String(result.change.repositoryId)));
         console.log(box(lines));
       }
     }
