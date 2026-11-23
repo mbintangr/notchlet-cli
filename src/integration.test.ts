@@ -10,7 +10,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { initWorkspace, scaffold } from '@notchlet/core';
 import { authCommand, resolveCredential, type CredentialStore } from './auth.js';
-import { autoSyncChange, bindWorkspace, callMcpTool, doctor, getWorkspaceSyncMode, importBacklogItem, linkChange, setWorkspaceSyncMode, syncCheckpoint, syncPull, syncPush, syncResolve, syncStatus } from './integration.js';
+import { autoSyncChange, bindWorkspace, callMcpTool, doctor, getWorkspaceSyncMode, importBacklogItem, linkChange, setWorkspaceSyncMode, syncCheckpoint, syncDeliver, syncPull, syncPush, syncResolve, syncStatus } from './integration.js';
 
 function mockDevelopmentServer(state: { capabilities: any; productAccessible?: boolean; repository?: any }) {
   const tools = ['workspace_context', 'product_get_details', 'backlog_list', 'backlog_get', 'backlog_development_context'].map(name => ({ name, description: name, inputSchema: { type: 'object', properties: {} } }));
@@ -319,7 +319,7 @@ const syncCapabilities = {
   server: { id: 'sync-server', version: '1.0.0' }, protocol: { minimum: '1.0', maximum: '1.0' },
   versions: { core: '1.0.0', schema: '1.0.0' },
   limits: { snapshotUploadBytes: 1_048_576, instructionContextBytes: 32768, pageSizeDefault: 20, pageSizeMaximum: 100 },
-  operations: ['createChange', 'uploadSnapshot', 'checkpoint', 'linkChange', 'getOperation'],
+  operations: ['createChange', 'uploadSnapshot', 'checkpoint', 'linkChange', 'getOperation', 'delivery'],
 };
 const digest = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 
@@ -371,6 +371,14 @@ async function syncFixture() {
       remote.operations.set(key, { operationId: key, payloadHash, state: 'succeeded', response: remote.content.get(snapshot.id) });
       if (remote.loseNextWriteResponse) { remote.loseNextWriteResponse = false; throw new TypeError('simulated lost response after commit'); }
       return Response.json(remote.content.get(snapshot.id), { status: 201 });
+    }
+    if (url.pathname === `/development/v1/changes/${remoteId}/delivery` && method === 'POST') {
+      const key = new Headers(init?.headers).get('Idempotency-Key')!;
+      const payloadHash = new Headers(init?.headers).get('X-Payload-SHA256')!;
+      const result = { operationId: key, changeId: remoteId, status: 'delivered', snapshotRevision: remote.metadata.snapshotRevision, changeRevision: remote.metadata.revision + 1, succeededTargets: ['backlog'], failedTargets: [], targets: { backlog: { status: 'succeeded', result: { backlogItemId: 31, status: 'DONE' } } }, completedAt: '2026-01-01T00:00:00Z' };
+      remote.metadata = { ...remote.metadata, revision: result.changeRevision };
+      remote.operations.set(key, { operationId: key, payloadHash, state: 'succeeded', response: result });
+      return Response.json(result);
     }
     if (url.pathname === `/development/v1/changes/${remoteId}/checkpoints` && method === 'POST') {
       const key = new Headers(init?.headers).get('Idempotency-Key')!;
@@ -506,6 +514,23 @@ test('checkpoint journals and reconciles a lost response without duplicating bac
     assert.equal(result.state, 'checkpointed');
     assert.equal(f.remote.checkpointComments.length, 1);
     assert.ok(f.remote.requests.some(r => r.path === `/development/v1/operations/${journal.operationId}`));
+  } finally { await f.dispose(); }
+});
+
+test('sync keeps the local change id in snapshot metadata while delivering by platform id', async () => {
+  const f = await syncFixture();
+  try {
+    const change = await scaffold(f.root, 'Delivery identity', 'quick');
+    const pushed = await syncPush(f.root, change.id, { server: f.server, fetch: f.fetcher, yes: true });
+    assert.equal(pushed.state, 'pushed');
+    assert.equal(pushed.remoteId, f.remoteId);
+    assert.notEqual(change.id, f.remoteId);
+    const snapshotPost = f.remote.requests.filter(r => r.method === 'POST' && r.path.endsWith('/snapshots')).at(-1)!;
+    assert.equal(snapshotPost.body.metadata.localChangeId, change.id);
+    const delivered = await syncDeliver(f.root, change.id, { status: 'DONE' }, { server: f.server, fetch: f.fetcher });
+    assert.equal(delivered.state, 'delivered');
+    const deliveryPost = f.remote.requests.filter(r => r.method === 'POST' && r.path.endsWith('/delivery')).at(-1)!;
+    assert.equal(deliveryPost.path, `/development/v1/changes/${f.remoteId}/delivery`);
   } finally { await f.dispose(); }
 });
 
