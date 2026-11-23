@@ -1,7 +1,7 @@
 {
   "manifestVersion": 1,
   "source": "skills/notchlet-super/SKILL.md",
-  "sourceVersion": "1.1.0",
+  "sourceVersion": "1.1.1",
   "sourceSha256": "db67c63083172df8c3d02861e5e2fb27ad2bf3a9be5ed03fb3c374f93fa9bae6",
   "skillsRepo": "mbintangr/notchlet-skills",
   "skillCount": 8,

@@ -709,7 +709,9 @@ async function applyBacklogItem(root: string, node: ChangeTreeNode, resolved: Re
 async function renameKeyFirst(root: string, node: ChangeTreeNode, sidecar: BacklogSidecar, key: string | undefined): Promise<string> {
   if (!key || node.children.length) return node.relativePath;
   const parent = node.relativePath.split('/').slice(0, -1).join('/');
-  const desired = composeNodeDirectory({ key, slug: sidecar.node.slug, ...(parent ? { parentRelativePath: parent } : {}) });
+  // Imported nodes already carry the platform key inside their slug; prefixing again would duplicate it.
+  const prefixed = sidecar.node.slug.startsWith(`${key.toLowerCase()}-`);
+  const desired = composeNodeDirectory({ ...(prefixed ? {} : { key }), slug: sidecar.node.slug, ...(parent ? { parentRelativePath: parent } : {}) });
   if (desired === node.relativePath) return node.relativePath;
   try { await resolveChangeLocation(root, desired, { scope: 'active' }); return node.relativePath; }
   catch { /* destination is free */ }

@@ -379,6 +379,24 @@ test('sync pull --tree imports remote-only children only when requested and dry-
   } finally { await f.dispose(); }
 });
 
+test('sync push --tree keeps a single key prefix on imported leaves', async () => {
+  const f = await treeFixture();
+  try {
+    await scaffoldNode(f.root, { name: 'Auth', itemType: 'EPIC' });
+    await syncTree(f.root, 'auth', 'push', { yes: true, server, fetch: f.fetcher, store: f.store });
+    f.allItems.set(2, { id: 2, productId: 31, parentId: 1, itemType: 'STORY', title: 'Login flow', key: 'NT-2', status: 'TODO', description: 'Users can log in.', updatedAt: '2026-01-02T00:00:00.000Z' });
+
+    await syncTree(f.root, 'nt-1-auth', 'pull', { server, fetch: f.fetcher, store: f.store, importNew: true });
+    assert.ok((await buildChangeTree(f.root)).byPath.has('nt-1-auth/nt-2-login-flow'));
+
+    await syncTree(f.root, 'nt-1-auth', 'push', { yes: true, server, fetch: f.fetcher, store: f.store });
+    const tree = await buildChangeTree(f.root);
+    assert.ok(tree.byPath.has('nt-1-auth/nt-2-login-flow'));
+    assert.equal(tree.nodes.some(node => node.relativePath.includes('nt-2-nt-2-')), false);
+    assert.equal((await readBacklogSidecar(path.join(f.root, '.notchlet', 'changes', 'nt-1-auth', 'nt-2-login-flow')))?.node.slug, 'nt-2-login-flow');
+  } finally { await f.dispose(); }
+});
+
 test('sync deliver --with-children delivers bottom-up with an explicit DONE status', async () => {
   const f = await treeFixture();
   try {
