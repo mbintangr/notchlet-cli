@@ -534,6 +534,15 @@ test('sync keeps the local change id in snapshot metadata while delivering by pl
   } finally { await f.dispose(); }
 });
 
+test('delivery before sync reports an actionable mapping error', async () => {
+  const f = await syncFixture();
+  try {
+    const change = await scaffold(f.root, 'Unsynced delivery', 'quick');
+    await assert.rejects(syncDeliver(f.root, change.id, { status: 'DONE' }, { server: f.server, fetch: f.fetcher }), /Change must be synchronized before delivery; run `notchlet sync push` first\./);
+    assert.equal(f.remote.requests.filter(r => r.method === 'POST' && r.path.endsWith('/delivery')).length, 0);
+  } finally { await f.dispose(); }
+});
+
 test('pending connected writes survive offline and revoked access, then reconnect from the journal', async () => {
   const f = await syncFixture();
   try {
