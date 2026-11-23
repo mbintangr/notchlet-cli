@@ -311,7 +311,7 @@ export async function syncPush(root: string, id: string, options: SyncOptions = 
     await saveSyncState(root, id, { remoteId, baseRevision: revision, baseHash: null });
     await clearPendingOperation(root, id, 'create');
   }
-  const snapshotBody = { content: pkg.bytes.toString('base64'), contentType: 'application/json', sourceRevision: Number(pkg.payload.change.revision ?? 1), metadata: { localChangeId: pkg.payload.change.id, payloadHash: hash } };
+  const snapshotBody = { content: pkg.bytes.toString('base64'), contentType: 'application/json', sourceRevision: Number(pkg.payload.change.revision ?? 1) || 1, metadata: { localChangeId: pkg.payload.change.id, payloadHash: hash } };
   const snapshotHash = sha256(canonical(snapshotBody));
   const journal = await pendingOperation(root, id, 'snapshot', snapshotHash, { method: 'POST', path: `/changes/${remoteId}/snapshots`, body: snapshotBody, expectedRevision: revision, remoteId });
   let snapshot = await reconcileOperation(ctx, journal.operationId, snapshotHash);

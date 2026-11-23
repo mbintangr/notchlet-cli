@@ -412,6 +412,7 @@ test('sync preview and first push create one remote change and use distinct idem
     assert.notEqual(new Headers(writes[0].headers).get('Idempotency-Key'), new Headers(writes[1].headers).get('Idempotency-Key'));
     assert.equal(new Headers(writes[0].headers).get('If-Match'), '"0"');
     assert.equal(new Headers(writes[1].headers).get('If-Match'), '"1"');
+    assert.equal(writes[1].body.sourceRevision, 1, 'a change at local revision 0 must source the remote creation revision');
     const pushed = JSON.parse(Buffer.from(writes[1].body.content, 'base64').toString());
     assert.deepEqual(Object.keys(pushed).sort(), ['artifacts', 'change', 'evidence']);
     assert.equal((await syncStatus(f.root, change.id, { server: f.server, fetch: f.fetcher })).state, 'unchanged');
