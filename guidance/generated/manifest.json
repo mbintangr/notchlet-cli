@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "source": "skills/notchlet-super/SKILL.md",
   "sourceVersion": "1.0.1",
-  "sourceSha256": "91c773474be46c98526558cb110e73d5365fb708c94ca52bde9007af2db90329",
+  "sourceSha256": "39c2854d6df61f7e759ac0605634a5a11e4e8b73fb4ffd7806f35b29019ed267",
   "skillsRepo": "mbintangr/notchlet-skills",
   "skillCount": 8,
   "skills": {
@@ -35,7 +35,7 @@
       "path": "skills/notchlet-review/SKILL.md"
     },
     "notchlet-super": {
-      "hash": "91c773474be46c98526558cb110e73d5365fb708c94ca52bde9007af2db90329",
+      "hash": "39c2854d6df61f7e759ac0605634a5a11e4e8b73fb4ffd7806f35b29019ed267",
       "path": "skills/notchlet-super/SKILL.md"
     }
   },
@@ -85,7 +85,7 @@
     {
       "client": "opencode",
       "path": "guidance/generated/opencode/notchlet-super/SKILL.md",
-      "sha256": "91c773474be46c98526558cb110e73d5365fb708c94ca52bde9007af2db90329",
+      "sha256": "39c2854d6df61f7e759ac0605634a5a11e4e8b73fb4ffd7806f35b29019ed267",
       "skill": "notchlet-super"
     },
     {
@@ -133,7 +133,7 @@
     {
       "client": "claude-code",
       "path": "guidance/generated/claude-code/notchlet-super/SKILL.md",
-      "sha256": "91c773474be46c98526558cb110e73d5365fb708c94ca52bde9007af2db90329",
+      "sha256": "39c2854d6df61f7e759ac0605634a5a11e4e8b73fb4ffd7806f35b29019ed267",
       "skill": "notchlet-super"
     },
     {
@@ -181,7 +181,7 @@
     {
       "client": "agent",
       "path": "guidance/generated/agent/notchlet-super/SKILL.md",
-      "sha256": "91c773474be46c98526558cb110e73d5365fb708c94ca52bde9007af2db90329",
+      "sha256": "39c2854d6df61f7e759ac0605634a5a11e4e8b73fb4ffd7806f35b29019ed267",
       "skill": "notchlet-super"
     }
   ]

@@ -1,5 +1,6 @@
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { directoryForRelative } from '@notchlet/core';
 
 export interface HistorySignature {
   signature: string;
@@ -100,8 +101,8 @@ function addSignature(map: Map<string, HistorySignature>, signature: string, at:
 
 async function logPaths(root: string, changeId: string): Promise<string[]> {
   const candidates = [
-    path.join(path.resolve(root), '.notchlet', 'changes', changeId, 'evidence', 'logs'),
-    path.join(path.resolve(root), '.notchlet', 'archive', changeId, 'evidence', 'logs'),
+    path.join(directoryForRelative(root, 'active', changeId), 'evidence', 'logs'),
+    path.join(directoryForRelative(root, 'archive', changeId), 'evidence', 'logs'),
   ];
   const files: string[] = [];
   for (const directory of candidates) {

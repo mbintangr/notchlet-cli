@@ -176,6 +176,20 @@ test('change close --preview is read-only and close requires an explicit baselin
     const preview = run(['change', 'close', id, '--preview']);
     assert.equal(preview.status, 0, preview.stderr);
     assert(JSON.parse(preview.stdout).data.blockers.some((blocker: { code: string }) => blocker.code === 'capability_impact_required'));
+    const gated = run(['change', 'close', id, '--preview', '--fail-on-blockers']);
+    assert.equal(gated.status, 1);
+    assert(JSON.parse(gated.stdout).data.blockers.length > 0);
+    const misplacedGate = run(['change', 'close', id, '--fail-on-blockers']);
+    assert.equal(misplacedGate.status, 64);
+    assert.equal(JSON.parse(misplacedGate.stdout).error.code, 'usage_error');
+    const closeHelp = run(['change', 'close', '--help']);
+    assert.equal(closeHelp.status, 0);
+    assert.match(closeHelp.stdout, /--fail-on-blockers/);
+    assert.match(closeHelp.stdout, /--accept-artifact-basis/);
+    const verifyHelp = run(['verify', '--help']);
+    assert.equal(verifyHelp.status, 0);
+    assert.match(verifyHelp.stdout, /--tree/);
+    assert.match(verifyHelp.stdout, /bottom-up/);
     await assert.rejects(readFile(path.join(dir, '.notchlet', 'archive', id)));
     const missingRevision = run(['change', 'close', id]);
     assert.equal(missingRevision.status, 64);
@@ -269,16 +283,25 @@ test('quick no-impact change closes through the CLI without a baseline revision 
     assert.equal(previewData.contribution, 'none');
     assert.deepEqual(previewData.blockers, []);
     assert.equal(previewData.verification.basis, 'artifact');
+    assert.equal(previewData.sourceBinding.bound, true);
+    assert.equal(previewData.sourceBinding.workspaceChecks, 1);
     assert.equal(await readFile(statePath, 'utf8'), before);
+    assert.equal(run(['change', 'close', id, '--preview', '--fail-on-blockers']).status, 0);
 
     const humanPreview = spawnSync(process.execPath, [cli, 'change', 'close', id, '--preview'], { cwd: dir, encoding: 'utf8' });
     assert.equal(humanPreview.status, 0, humanPreview.stderr);
     assert.match(humanPreview.stdout, /Capability contribution/);
     assert.match(humanPreview.stdout, /Planning readiness/);
     assert.match(humanPreview.stdout, /Verification/);
+    assert.match(humanPreview.stdout, /Verification: current \(artifact basis\)/);
+    assert.match(humanPreview.stdout, /Source binding: workspace fingerprint \(artifact basis; source bound/);
     assert.match(humanPreview.stdout, /Local closure/);
     assert.match(humanPreview.stdout, /Remote delivery/);
     assert.match(humanPreview.stdout, /No files were changed/);
+
+    const humanStatus = spawnSync(process.execPath, [cli, 'status', id], { cwd: dir, encoding: 'utf8' });
+    assert.equal(humanStatus.status, 0, humanStatus.stderr);
+    assert.match(humanStatus.stdout, /Source binding: workspace fingerprint \(artifact basis; source bound/);
 
     const rejected = run(['change', 'close', id, '--baseline-revision', '0']);
     assert.equal(rejected.status, 64);
@@ -289,6 +312,9 @@ test('quick no-impact change closes through the CLI without a baseline revision 
     assert.equal(JSON.parse(closed.stdout).data.archived, true);
     await access(path.join(dir, '.notchlet', 'archive', id, 'tasks.json'));
     await access(path.join(dir, '.notchlet', 'archive', id, 'closure.json'));
+    const archivedShow = spawnSync(process.execPath, [cli, 'change', 'show', id], { cwd: dir, encoding: 'utf8' });
+    assert.equal(archivedShow.status, 0, archivedShow.stderr);
+    assert.match(archivedShow.stdout, /Source binding at close: bound/);
     await assert.rejects(access(path.join(dir, '.notchlet', 'capabilities')));
 
     const second = JSON.parse(run(['change', 'new', 'Second no impact', '--quick']).stdout).data.id as string;
@@ -331,6 +357,33 @@ test('quick no-impact change closes through the CLI without a baseline revision 
     assert.equal(JSON.parse(restored.stdout).data.id, id);
     assert.deepEqual(JSON.parse(run(['change', 'list', '--archived']).stdout).data.changes.map((change: { id: string }) => change.id), [second]);
     assert.equal(JSON.parse(run(['change', 'show', id]).stdout).data.archived, false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('verify render recovery recommends --force only for unmarked artifacts', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'notchlet-render-recovery-'));
+  const cli = process.env.NOTCHLET_PACKED_CLI_PATH ?? path.resolve('dist/cli.js');
+  const run = (args: string[]) => spawnSync(process.execPath, [cli, ...args, '--json'], { cwd: dir, encoding: 'utf8' });
+  try {
+    assert.equal(run(['init']).status, 0);
+    const created = run(['change', 'new', 'Render recovery']);
+    assert.equal(created.status, 0, created.stderr);
+    const id = JSON.parse(created.stdout).data.id as string;
+    assert.equal(run(['change', 'add', id, 'check', '--id', 'C1', '--description', 'Passes', '--kind', 'command', '--command', 'node -e "process.exit(0)"']).status, 0);
+    assert.equal(run(['change', 'render', id, '--write', '--markdown']).status, 0);
+
+    const artifact = path.join(dir, '.notchlet', 'changes', id, 'proposal.md');
+    const generated = await readFile(artifact, 'utf8');
+    await writeFile(artifact, `${generated}\nHand note: review the proposal.\n`);
+    const authored = JSON.parse(run(['verify', id]).stdout).data;
+    assert.equal(authored.renderRecovery, `notchlet change render ${id} --write`);
+    assert.equal(run(['change', 'render', id, '--write']).status, 0, 'authored drift is repaired without --force');
+
+    await writeFile(artifact, 'hand-authored content\n');
+    const unmarked = JSON.parse(run(['verify', id]).stdout).data;
+    assert.equal(unmarked.renderRecovery, `notchlet change render ${id} --write --force`);
+    assert.equal(run(['change', 'render', id, '--write']).status, 1, 'unmarked content still requires --force');
+    assert.equal(run(['change', 'render', id, '--write', '--force']).status, 0);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

@@ -162,3 +162,43 @@ test('authoring integrity covers batch apply, item edits, strict options, revisi
     assert.equal(JSON.parse(await readFile(tasksFile, 'utf8')).mode, 'standard');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('authoring surfaces the setup advisory for mutating UI checks', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'notchlet-cli-authoring-advice-'));
+  const cli = process.env.NOTCHLET_PACKED_CLI_PATH ?? path.resolve('dist/cli.js');
+  const run = (args: string[]) => spawnSync(process.execPath, [cli, ...args], { cwd: dir, encoding: 'utf8', timeout: 20000 });
+  try {
+    assert.equal(run(['init', '--local']).status, 0);
+    const created = run(['change', 'new', 'Advisory authoring', '--quick', '--json']);
+    assert.equal(created.status, 0, created.stderr);
+    const id = JSON.parse(created.stdout).data.id as string;
+
+    const batchFile = path.join(dir, 'batch.json');
+    await writeFile(batchFile, JSON.stringify({
+      expectedRevision: 0,
+      operations: [{
+        op: 'add', kind: 'check', id: 'CHECK-APPLY', description: 'Apply mutates the form', checkKind: 'ui',
+        url: 'http://127.0.0.1:9/form', waitFor: '#app',
+        steps: [{ action: 'fill', selector: '#name', value: 'Widget' }, { action: 'click', selector: '#save' }],
+      }],
+    }));
+    const applied = run(['change', 'apply', id, '--file', batchFile, '--json']);
+    assert.equal(applied.status, 0, applied.stderr);
+    assert.equal(JSON.parse(applied.stdout).warnings[0].code, 'setup_missing_for_mutating_ui');
+    assert.deepEqual(JSON.parse(applied.stdout).warnings[0].checkIds, ['CHECK-APPLY']);
+
+    const added = run(['change', 'add', id, 'check', '--id', 'CHECK-ADD', '--description', 'Add mutates the form', '--kind', 'ui', '--url', 'http://127.0.0.1:9/form', '--wait-for', '#app', '--step', '{"action":"fill","selector":"#name","value":"Widget"}', '--json']);
+    assert.equal(added.status, 0, added.stderr);
+    assert.equal(JSON.parse(added.stdout).warnings[0].code, 'setup_missing_for_mutating_ui');
+
+    const updated = run(['change', 'update', id, 'check', 'CHECK-ADD', '--step', '{"action":"select","selector":"#kind","value":"retail"}', '--json']);
+    assert.equal(updated.status, 0, updated.stderr);
+    assert.equal(JSON.parse(updated.stdout).warnings[0].code, 'setup_missing_for_mutating_ui');
+
+    const withSetup = run(['change', 'update', id, '--setup', 'node -e "process.exit(0)"', '--json']);
+    assert.equal(withSetup.status, 0, withSetup.stderr);
+    const quiet = run(['change', 'update', id, 'check', 'CHECK-ADD', '--step', '{"action":"fill","selector":"#name","value":"Widget"}', '--json']);
+    assert.equal(quiet.status, 0, quiet.stderr);
+    assert.deepEqual(JSON.parse(quiet.stdout).warnings, []);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

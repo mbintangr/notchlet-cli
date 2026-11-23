@@ -302,6 +302,10 @@ server.listen(${port}, '127.0.0.1', () => console.log('ready'));
     assert.equal(passing.status, 'passed');
     assert.deepEqual(passing.rendered.steps.map((step: any) => step.ok), [true, true, true]);
     assert.equal(passing.capture.policy, 'always');
+    assert.equal(passed.envelope.data.observationBasis, 'artifact');
+    const shown = run(dir, ['change', 'show', id]);
+    assert.equal(shown.status, 0, shown.stderr);
+    assert.equal(shown.envelope.data.observationBasis, 'artifact');
     await access(path.join(dir, passing.capture.screenshotPath));
     await access(path.join(dir, passing.capture.domPath));
 
@@ -325,6 +329,72 @@ server.listen(${port}, '127.0.0.1', () => console.log('ready'));
     assert.equal(visibleAssertion.passed, false);
     assert.equal(hiddenCheck.capture.policy, 'on-failure');
     await access(path.join(dir, hiddenCheck.capture.screenshotPath));
+
+    const authored = run(dir, ['change', 'add', id, 'check', '--id', 'CHECK-AUTHORED', '--description', 'Authored visibility assertions', '--kind', 'ui', '--url', `http://127.0.0.1:${port}/hidden`, '--wait-for', '#app', '--settle-ms', '50', '--expected-visible-selector', '#app', '--expected-hidden-selector', '#form']);
+    assert.equal(authored.status, 0, `${authored.stdout}\n${authored.stderr}`);
+    const authoredCheck = authored.envelope.data.checks.find((check: any) => check.id === 'CHECK-AUTHORED');
+    assert.deepEqual(authoredCheck.expectedVisibleSelectors, ['#app']);
+    assert.deepEqual(authoredCheck.expectedHiddenSelectors, ['#form']);
+    const authoredHiddenPass = run(dir, ['verify', id, '--check', 'CHECK-AUTHORED']);
+    assert.equal(authoredHiddenPass.status, 0, `${authoredHiddenPass.stdout}\n${authoredHiddenPass.stderr}`);
+    const authoredHiddenAssertion = authoredHiddenPass.envelope.data.verification.results[0].assertions.find((assertion: any) => assertion.kind === 'hidden');
+    assert.equal(authoredHiddenAssertion.passed, true);
+    assert.equal(authoredHiddenAssertion.observed, 'hidden');
+    assert.equal(authoredHiddenPass.envelope.data.verification.results[0].hints, undefined);
+
+    const absent = run(dir, ['change', 'add', id, 'check', '--id', 'CHECK-ABSENT', '--description', 'Absent selector is not visible', '--kind', 'ui', '--url', `http://127.0.0.1:${port}/hidden`, '--wait-for', '#app', '--settle-ms', '50', '--expected-hidden-selector', '#never-there']);
+    assert.equal(absent.status, 0, `${absent.stdout}\n${absent.stderr}`);
+    const absentPass = run(dir, ['verify', id, '--check', 'CHECK-ABSENT']);
+    assert.equal(absentPass.status, 0, `${absentPass.stdout}\n${absentPass.stderr}`);
+    const absentResult = absentPass.envelope.data.verification.results[0];
+    const absentAssertion = absentResult.assertions.find((assertion: any) => assertion.kind === 'hidden');
+    assert.equal(absentAssertion.passed, true);
+    assert.equal(absentAssertion.observed, 'absent');
+    assert.equal(absentResult.hints, undefined, 'a hidden-only check treats absence as deliberate');
+
+    const hintAuthored = run(dir, ['change', 'add', id, 'check', '--id', 'CHECK-HINT', '--description', 'Visible page with an absent hidden target', '--kind', 'ui', '--url', `http://127.0.0.1:${port}/hidden`, '--wait-for', '#app', '--settle-ms', '50', '--expected-visible-selector', '#app', '--expected-hidden-selector', '#never-there']);
+    assert.equal(hintAuthored.status, 0, `${hintAuthored.stdout}\n${hintAuthored.stderr}`);
+    const hintPass = run(dir, ['verify', id, '--check', 'CHECK-HINT']);
+    assert.equal(hintPass.status, 0, `${hintPass.stdout}\n${hintPass.stderr}`);
+    assert.match(hintPass.envelope.data.verification.results[0].hints[0], /hidden-absent: #never-there passed because the selector is absent/);
+
+    const repointed = run(dir, ['change', 'update', id, 'check', 'CHECK-AUTHORED', '--url', `http://127.0.0.1:${port}/form`, '--expected-visible-selector', '#name', '--expected-enabled-selector', '#save', '--expected-hidden-selector', '#heading']);
+    assert.equal(repointed.status, 0, `${repointed.stdout}\n${repointed.stderr}`);
+    const repointedCheck = repointed.envelope.data.checks.find((check: any) => check.id === 'CHECK-AUTHORED');
+    assert.deepEqual(repointedCheck.expectedVisibleSelectors, ['#name']);
+    assert.deepEqual(repointedCheck.expectedEnabledSelectors, ['#save']);
+    assert.deepEqual(repointedCheck.expectedHiddenSelectors, ['#heading']);
+    const authoredHiddenFail = run(dir, ['verify', id, '--check', 'CHECK-AUTHORED']);
+    assert.equal(authoredHiddenFail.status, 1);
+    const authoredFailure = authoredHiddenFail.envelope.data.verification.results[0];
+    assert.equal(authoredFailure.assertions.find((assertion: any) => assertion.kind === 'visible').passed, true);
+    assert.equal(authoredFailure.assertions.find((assertion: any) => assertion.kind === 'enabled').passed, true);
+    const hiddenAssertion = authoredFailure.assertions.find((assertion: any) => assertion.kind === 'hidden');
+    assert.equal(hiddenAssertion.passed, false);
+    assert.equal(hiddenAssertion.observed, 'visible');
+
+    const addHelp = run(dir, ['change', 'add', '--help']);
+    assert.equal(addHelp.status, 0, addHelp.stderr);
+    assert.match(addHelp.envelope.data.usage, /--step <json>/);
+    assert.match(addHelp.envelope.data.usage, /--expected-scoped-text <json>/);
+    assert.match(addHelp.envelope.data.usage, /--expected-hidden-selector <selector>/);
+
+    const rich = run(dir, ['change', 'add', id, 'check', '--id', 'CHECK-RICH', '--description', 'Rich UI authoring', '--kind', 'ui', '--url', `http://127.0.0.1:${port}/form`, '--wait-for', '#app', '--settle-ms', '50', '--expected-title', 'Form Fixture', '--expected-scoped-text', '{"selector":"#heading","contains":"Create item"}', '--step', '{"action":"assertText","selector":"#heading","text":"Create item"}', '--capture-artifacts', 'always']);
+    assert.equal(rich.status, 0, `${rich.stdout}\n${rich.stderr}`);
+    const richCheck = rich.envelope.data.checks.find((check: any) => check.id === 'CHECK-RICH');
+    assert.equal(richCheck.expectedTitle, 'Form Fixture');
+    assert.deepEqual(richCheck.expectedScopedText, [{ selector: '#heading', contains: 'Create item' }]);
+    assert.deepEqual(richCheck.steps, [{ action: 'assertText', selector: '#heading', text: 'Create item' }]);
+    assert.equal(richCheck.captureArtifacts, 'always');
+    const richPass = run(dir, ['verify', id, '--check', 'CHECK-RICH']);
+    assert.equal(richPass.status, 0, `${richPass.stdout}\n${richPass.stderr}`);
+    assert.equal(richPass.envelope.data.verification.results[0].capture.policy, 'always');
+
+    const richUpdate = run(dir, ['change', 'update', id, 'check', 'CHECK-RICH', '--expected-title', 'Form Fixture', '--expected-scoped-text', '{"selector":"#heading","contains":"Create item"}', '--step', '{"action":"assertText","selector":"#heading","text":"Create item"}', '--capture-artifacts', 'never']);
+    assert.equal(richUpdate.status, 0, `${richUpdate.stdout}\n${richUpdate.stderr}`);
+    const richUpdated = richUpdate.envelope.data.checks.find((check: any) => check.id === 'CHECK-RICH');
+    assert.deepEqual(richUpdated.steps, [{ action: 'assertText', selector: '#heading', text: 'Create item' }]);
+    assert.equal(richUpdated.captureArtifacts, 'never');
 
     await saveChange(file, { ...change, checks: [{ id: 'CHECK-CONSOLE', description: 'Page throws', kind: 'ui', url: `http://127.0.0.1:${port}/throws`, waitFor: '#app', settleMs: 50, expectedNoConsoleErrors: true }] });
     const consoleFailure = run(dir, ['verify', id]);

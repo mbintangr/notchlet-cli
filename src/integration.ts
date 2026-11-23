@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { inspectGitContext, parseChange, scaffold, readChange, type Change } from '@notchlet/core';
+import { BACKLOG_SCHEMA_VERSION, changeRefHash, inspectGitContext, parseChange, resolveChangeLocation, scaffold, readChange, readBacklogSidecar, writeBacklogSidecar, withLinkedItem, type BacklogSidecar, type Change } from '@notchlet/core';
 import { getProfile, resolveCredential, type AuthProfile, type CredentialStore } from './auth.js';
 
 export type Fetcher = typeof fetch;
@@ -13,25 +13,46 @@ export function normalizeRemote(remote: { host: string; owner: string; repo: str
 type IntegrationOptions = { server?: string; endpoint?: string; allowFileStore?: boolean; fetch?: Fetcher; store?: CredentialStore; loadStore?: () => Promise<CredentialStore> };
 type Capabilities = { server: { id: string; version: string }; protocol: { minimum: string; maximum: string }; versions: { core: string; schema: string }; operations: string[] };
 
+export type SyncOptions = { server?: string; endpoint?: string; fetch?: Fetcher; store?: CredentialStore; loadStore?: () => Promise<CredentialStore>; yes?: boolean; preview?: boolean; requiredOperations?: string[]; backlogItemId?: number };
 const MAX_SYNC_BYTES = 1_048_576;
-type SyncOptions = { server?: string; endpoint?: string; fetch?: Fetcher; store?: CredentialStore; loadStore?: () => Promise<CredentialStore>; yes?: boolean; preview?: boolean; requiredOperations?: string[] };
 const sha256 = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 const syncDir = (root: string) => path.join(root, '.notchlet', '.local', 'sync');
+
+interface SyncIdentity { key: string; relativePath: string; directory: string; changeId: string; sidecar: BacklogSidecar | null }
+/**
+ * Remote work is identified by backlog item when linked, otherwise by a hash of the relative path, so
+ * renames and moves never fork sync history. Flat legacy changes keep their ID-based file names.
+ */
+async function syncIdentity(root: string, id: string): Promise<SyncIdentity> {
+  const location = await resolveChangeLocation(root, id, { scope: 'merged' });
+  const sidecar = await readBacklogSidecar(location.directory);
+  const key = sidecar?.platform.itemId !== undefined
+    ? `item-${sidecar.platform.itemId}`
+    : location.relativePath === location.id ? location.id : `local-${changeRefHash(location.relativePath)}`;
+  return { key, relativePath: location.relativePath, directory: location.directory, changeId: location.id, sidecar };
+}
 async function syncState(root: string, id: string): Promise<any> {
-  try { return JSON.parse(await readFile(path.join(syncDir(root), `${id}.json`), 'utf8')); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+  const { key } = await syncIdentity(root, id);
+  for (const candidate of key === id ? [key] : [key, id]) {
+    try { return JSON.parse(await readFile(path.join(syncDir(root), `${candidate}.json`), 'utf8')); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
+  return null;
 }
 async function saveSyncState(root: string, id: string, state: any): Promise<void> {
+  const { key } = await syncIdentity(root, id);
   const dir = syncDir(root); await mkdir(dir, { recursive: true });
-  await writeFile(path.join(dir, `${id}.json`), `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(path.join(dir, `${key}.json`), `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
 }
-const operationFile = (root: string, id: string, step: string) => path.join(syncDir(root), `${id}.${step}.operation.json`);
+async function operationFile(root: string, id: string, step: string) {
+  return path.join(syncDir(root), `${(await syncIdentity(root, id)).key}.${step}.operation.json`);
+}
 async function readPendingOperation(root: string, id: string, step: string) {
-  try { return JSON.parse(await readFile(operationFile(root, id, step), 'utf8')); }
+  try { return JSON.parse(await readFile(await operationFile(root, id, step), 'utf8')); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
 }
 async function pendingOperation(root: string, id: string, step: string, payloadHash: string, details: Record<string, unknown>) {
-  const file = operationFile(root, id, step);
+  const file = await operationFile(root, id, step);
   try {
     const saved = JSON.parse(await readFile(file, 'utf8'));
     if (saved.payloadHash !== payloadHash) throw Object.assign(new Error('A previous sync operation has an unresolved response for different local content. Reconcile it before changing this payload.'), { code: 'operation_payload_conflict' });
@@ -46,7 +67,20 @@ async function pendingOperation(root: string, id: string, step: string, payloadH
   await rename(temporary, file);
   return saved;
 }
-async function clearPendingOperation(root: string, id: string, step: string) { await rm(operationFile(root, id, step), { force: true }); }
+async function clearPendingOperation(root: string, id: string, step: string) { await rm(await operationFile(root, id, step), { force: true }); }
+async function updateSidecarSync(root: string, id: string, state: { remoteId: string; baseRevision?: number; remoteStatus?: BacklogSidecar['platform']['remoteStatus'] }): Promise<void> {
+  const identity = await syncIdentity(root, id);
+  if (!identity.sidecar) return;
+  const now = new Date().toISOString();
+  const sidecar: BacklogSidecar = {
+    ...identity.sidecar,
+    schemaVersion: BACKLOG_SCHEMA_VERSION,
+    ...(identity.sidecar.platform.itemId === undefined ? {} : { platform: { ...identity.sidecar.platform, ...(state.remoteStatus === undefined ? {} : { remoteStatus: state.remoteStatus, remoteUpdatedAt: now }) } }),
+    sync: { ...identity.sidecar.sync, state: 'linked', remoteChangeId: state.remoteId, ...(state.baseRevision === undefined ? {} : { snapshotRevision: state.baseRevision }), ...(state.baseRevision === undefined ? {} : { lastPushedRevision: state.baseRevision }) },
+    meta: { ...identity.sidecar.meta, updatedAt: now },
+  };
+  await writeBacklogSidecar(identity.directory, sidecar);
+}
 async function importMarkerForChange(root: string, changeId: string): Promise<{ itemId: number; productId: number } | null> {
   const dir = path.join(root, '.notchlet', 'imports');
   let entries: string[];
@@ -75,20 +109,21 @@ function canonical(value: unknown): string {
   if (value && typeof value === 'object') return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`).join(',')}}`;
   return JSON.stringify(value);
 }
-async function changePackage(root: string, id: string): Promise<{ payload: any; bytes: Buffer; hash: string }> {
-  const change = await readChange(root, id);
+async function changePackage(root: string, id: string): Promise<{ payload: any; bytes: Buffer; hash: string; relativePath: string }> {
+  const identity = await syncIdentity(root, id);
+  const change = await readChange(root, identity.relativePath);
   const artifacts: Record<string, string> = {};
   for (const relative of Object.values(change.artifacts)) {
-    try { artifacts[relative] = await readFile(path.join(root, '.notchlet', 'changes', id, relative), 'utf8'); }
+    try { artifacts[relative] = await readFile(path.join(identity.directory, relative), 'utf8'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
   let evidence = '';
-  try { evidence = await readFile(path.join(root, '.notchlet', 'changes', id, 'evidence.jsonl'), 'utf8'); }
+  try { evidence = await readFile(path.join(identity.directory, 'evidence.jsonl'), 'utf8'); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   const payload = { change, artifacts, evidence };
   const bytes = Buffer.from(canonical(payload));
   if (bytes.byteLength > MAX_SYNC_BYTES) throw Object.assign(new Error('Sync package exceeds the 1 MiB limit.'), { code: 'payload_too_large' });
-  return { payload, bytes, hash: sha256(bytes) };
+  return { payload, bytes, hash: sha256(bytes), relativePath: identity.relativePath };
 }
 
 async function syncContext(root: string, options: SyncOptions) {
@@ -145,8 +180,8 @@ function validateRemotePackage(id: string, remotePackage: any) {
 }
 
 async function reconcileRemotePackage(root: string, id: string, localPackage: any, remotePackage: any): Promise<void> {
-  const { files } = validateRemotePackage(id, remotePackage);
-  const changeDir = path.join(root, '.notchlet', 'changes', id);
+  const { files } = validateRemotePackage(localPackage.change.id, remotePackage);
+  const changeDir = (await syncIdentity(root, id)).directory;
   const transaction = path.join(changeDir, `.sync-stage-${randomUUID()}`), backup = path.join(transaction, '.backup');
   const installed: string[] = [], originals = new Map<string, Buffer | null>();
   await mkdir(path.join(transaction, 'new'), { recursive: true });
@@ -215,6 +250,15 @@ export async function syncPush(root: string, id: string, options: SyncOptions = 
   const pkg = await changePackage(root, id), local = await syncState(root, id), ctx = await syncContext(root, options);
   const hash = pkg.hash;
   let remoteId = local?.remoteId, revision = 0;
+  if (remoteId && options.backlogItemId !== undefined) {
+    const existing = await remoteJson(ctx, `/changes/${remoteId}`);
+    if (!existing.ok) throw new Error('Could not read remote change before linking.');
+    const metadata = await existing.json() as any;
+    if (metadata.backlogItemId !== options.backlogItemId) {
+      const linked = await remoteJson(ctx, `/changes/${remoteId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: canonical({ backlogItemId: options.backlogItemId }) });
+      if (!linked.ok) throw Object.assign(new Error('Could not link the existing remote change to its backlog item.'), { code: 'remote_write_failed' });
+    }
+  }
   if (remoteId) {
     const pendingCreate = await readPendingOperation(root, id, 'create');
     if (pendingCreate) {
@@ -244,12 +288,13 @@ export async function syncPush(root: string, id: string, options: SyncOptions = 
   const preview = { change: id, remoteId: remoteId ?? null, expectedRevision: revision, payloadHash: hash, bytes: pkg.bytes.byteLength, willCreate: !remoteId };
   if (!options.yes && !options.preview) return { state: 'preview', preview, nextAction: 'Review this package and repeat with --yes to apply.' };
   if (!remoteId) {
-    const marker = await importMarkerForChange(root, id);
+    const marker = await importMarkerForChange(root, pkg.payload.change.id);
+    const backlogItemId = options.backlogItemId ?? (marker && marker.productId === ctx.binding.productId ? marker.itemId : undefined);
     const body = {
       productId: ctx.binding.productId,
       title: pkg.payload.change.name,
-      description: pkg.payload.change.description ?? '',
-      ...(marker && marker.productId === ctx.binding.productId ? { backlogItemId: marker.itemId } : {}),
+      description: (pkg.payload.change.outcome || pkg.payload.change.intent || pkg.payload.change.name).slice(0, 4000),
+      ...(backlogItemId === undefined ? {} : { backlogItemId }),
       ...(positiveId(Number(ctx.binding.repositoryId)) ? { repositoryId: Number(ctx.binding.repositoryId) } : {}),
     };
     const bodyHash = sha256(canonical(body));
@@ -266,7 +311,7 @@ export async function syncPush(root: string, id: string, options: SyncOptions = 
     await saveSyncState(root, id, { remoteId, baseRevision: revision, baseHash: null });
     await clearPendingOperation(root, id, 'create');
   }
-  const snapshotBody = { content: pkg.bytes.toString('base64'), contentType: 'application/json', sourceRevision: Number(pkg.payload.change.revision ?? 1), metadata: { localChangeId: id, payloadHash: hash } };
+  const snapshotBody = { content: pkg.bytes.toString('base64'), contentType: 'application/json', sourceRevision: Number(pkg.payload.change.revision ?? 1), metadata: { localChangeId: pkg.payload.change.id, payloadHash: hash } };
   const snapshotHash = sha256(canonical(snapshotBody));
   const journal = await pendingOperation(root, id, 'snapshot', snapshotHash, { method: 'POST', path: `/changes/${remoteId}/snapshots`, body: snapshotBody, expectedRevision: revision, remoteId });
   let snapshot = await reconcileOperation(ctx, journal.operationId, snapshotHash);
@@ -278,6 +323,7 @@ export async function syncPush(root: string, id: string, options: SyncOptions = 
   }
   if (!snapshot || snapshot.changeId !== remoteId || snapshot.sha256 !== hash) throw new Error('Reconciled snapshot result does not match the pending local payload.');
   await saveSyncState(root, id, { remoteId, baseRevision: snapshot.changeRevision, baseHash: hash, capturedAt: snapshot.createdAt ?? new Date().toISOString() });
+  await updateSidecarSync(root, id, { remoteId, baseRevision: snapshot.changeRevision });
   await clearPendingOperation(root, id, 'snapshot');
   return { state: 'pushed', remoteId, revision: snapshot.changeRevision, hash };
 }
@@ -302,6 +348,7 @@ export async function syncPull(root: string, id: string, options: SyncOptions = 
   let parsed: any; try { parsed = JSON.parse(decoded.toString('utf8')); } catch { throw new Error('Remote snapshot is not a valid sync package.'); }
   await reconcileRemotePackage(root, id, pkg.payload, parsed);
   await saveSyncState(root, id, { remoteId: local.remoteId, baseRevision: metadata.revision, baseHash: latest.sha256, capturedAt: latest.createdAt ?? new Date().toISOString() });
+  await updateSidecarSync(root, id, { remoteId: local.remoteId, baseRevision: metadata.snapshotRevision ?? undefined, remoteStatus: metadata.backlogStatus });
   return { state: 'pulled', remoteId: local.remoteId, revision: metadata.revision, hash: latest.sha256 };
 }
 
@@ -335,7 +382,7 @@ export async function syncResolve(root: string, id: string, strategy: 'keep-loca
     return { state: 'conflict', conflict: 'incompatible_remote_snapshot', nextAction: 'Remote snapshot failed identity, revision, size, or hash verification; no local base was advanced.' };
   }
   let remotePackage: any;
-  try { remotePackage = JSON.parse(decoded.toString('utf8')); validateRemotePackage(id, remotePackage); }
+  try { remotePackage = JSON.parse(decoded.toString('utf8')); validateRemotePackage(pkg.payload.change.id, remotePackage); }
   catch { return { state: 'conflict', conflict: 'incompatible_remote_snapshot', nextAction: 'Remote snapshot does not match this change schema or artifact identity; no local base was advanced.' }; }
 
   if (latest.sha256 === local.baseHash) {
@@ -376,6 +423,36 @@ export async function syncCheckpoint(root: string, id: string, input: { name: st
   await clearPendingOperation(root, id, 'checkpoint');
   return { state: 'checkpointed', remoteId: local.remoteId, checkpoint: result };
 }
+
+export async function syncDeliver(root: string, id: string, input: { status: 'TODO' | 'IN_PROGRESS' | 'IN_REVIEW' | 'DONE'; summary?: string }, options: SyncOptions = {}) {
+  const local = await syncState(root, id);
+  if (!local?.remoteId) throw new Error('Change must be synchronized before delivery; run `notchlet sync push` first.');
+  const ctx = await syncContext(root, { ...options, requiredOperations: ['delivery'] });
+  const metadataResponse = await remoteJson(ctx, `/changes/${local.remoteId}`);
+  if (!metadataResponse.ok) throw new Error('Could not read remote change before delivery.');
+  const metadata = await metadataResponse.json() as any;
+  if (!Number.isSafeInteger(metadata.snapshotRevision) || metadata.snapshotRevision < 1) throw new Error('A synchronized snapshot is required before delivery.');
+  const body = { snapshotRevision: metadata.snapshotRevision, target: 'backlog' as const, backlogStatus: input.status, ...(input.summary === undefined ? {} : { summary: input.summary }) };
+  const bodyHash = sha256(canonical(body));
+  const journal = await pendingOperation(root, id, 'delivery', bodyHash, { method: 'POST', path: `/changes/${local.remoteId}/delivery`, body, expectedRevision: metadata.revision, remoteId: local.remoteId });
+  let result = await reconcileOperation(ctx, journal.operationId, bodyHash);
+  if (!result) {
+    const response = await remoteJson(ctx, `/changes/${local.remoteId}/delivery`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'If-Match': `"${journal.expectedRevision}"`, 'Idempotency-Key': journal.operationId, 'X-Payload-SHA256': bodyHash }, body: canonical(body) });
+    if (response.status === 409 || response.status === 412) { await clearPendingOperation(root, id, 'delivery'); return { state: 'conflict' as const, conflict: 'revision_conflict', nextAction: 'Refresh remote change state, review the delivery blockers, and retry deliberately.' }; }
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`;
+      try { const payload = await response.json() as any; detail = payload?.message ?? payload?.code ?? detail; } catch { /* keep HTTP status */ }
+      throw Object.assign(new Error(`Remote delivery was rejected: ${detail}`), { code: 'delivery_blocked', status: response.status });
+    }
+    result = await response.json() as any;
+  }
+  if (!result || result.changeId !== local.remoteId || result.status === undefined) throw new Error('Reconciled delivery result does not match the pending operation.');
+  await clearPendingOperation(root, id, 'delivery');
+  const failed = result.status !== 'delivered';
+  await updateSidecarSync(root, id, { remoteId: local.remoteId, ...(failed || input.status === undefined ? {} : { remoteStatus: input.status }) });
+  return { state: failed ? 'delivery_partial' as const : 'delivered' as const, remoteId: local.remoteId, delivery: result };
+}
+
 
 export async function linkChange(root: string, id: string, input: { backlogItemId?: number; repositoryId?: number }, options: SyncOptions = {}) {
   if (input.backlogItemId === undefined && input.repositoryId === undefined) throw new Error('Provide a backlog item ID, a repository ID, or both.');
@@ -473,7 +550,7 @@ async function verifyProductRepository(input: { productId: number; repositoryId:
   return { product, repository: selected, repositoryRemote };
 }
 
-export async function bindWorkspace(root: string, input: { server: string; productId: number; repositoryId: number; endpoint?: string; rebind?: boolean; allowFileStore?: boolean; fetch?: Fetcher; store?: CredentialStore; loadStore?: () => Promise<CredentialStore> }) {
+export async function bindWorkspace(root: string, input: { server: string; productId: number; repositoryId: number; endpoint?: string; rebind?: boolean; context?: { organizationName?: string; teamName?: string; productName?: string; productSlug?: string; repositoryLabel?: string }; allowFileStore?: boolean; fetch?: Fetcher; store?: CredentialStore; loadStore?: () => Promise<CredentialStore> }) {
   if (!positiveId(input.productId) || !positiveId(input.repositoryId)) throw new Error('Product and repository IDs must be positive integers.');
   const profile = await getProfile(input.server);
   if (!profile) throw new Error('No profile exists for the selected server; authenticate first.');
@@ -487,13 +564,18 @@ export async function bindWorkspace(root: string, input: { server: string; produ
   if (!matchingRemote) throw Object.assign(new Error('Selected product repository remote does not match this Git checkout.'), { diagnostic: 'repository_mismatch' });
   const file = path.join(root, '.notchlet', 'workspace.json');
   const old = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
-  const binding = { serverIdentity: capabilities.server.id, server: profile.origin, endpoint: input.endpoint, protocol: capabilities.protocol, coreVersion: capabilities.versions.core, schemaVersion: capabilities.versions.schema, productId: input.productId, repositoryId: input.repositoryId, repositoryRemote: verified.repositoryRemote, gitRoot: git.repository.topLevel };
-  const prior = old.binding as typeof binding | undefined;
+  const prior = old.binding as { serverIdentity: string; server: string; endpoint?: string; protocol: unknown; coreVersion: string; schemaVersion: string; productId: number; repositoryId: number; repositoryRemote: string; gitRoot: string; context?: Record<string, string> } | undefined;
+  const context = input.context ?? prior?.context;
+  const binding = { serverIdentity: capabilities.server.id, server: profile.origin, endpoint: input.endpoint, protocol: capabilities.protocol, coreVersion: capabilities.versions.core, schemaVersion: capabilities.versions.schema, productId: input.productId, repositoryId: input.repositoryId, repositoryRemote: verified.repositoryRemote, gitRoot: git.repository.topLevel, ...(context === undefined ? {} : { context }) };
   const fields: (keyof typeof binding)[] = ['serverIdentity', 'server', 'productId', 'repositoryId', 'repositoryRemote', 'gitRoot'];
-  if (prior && !input.rebind && fields.some(field => prior[field] !== binding[field])) throw new Error('Workspace binding differs from the current server or checkout; pass --rebind to confirm.');
-  if (prior && !input.rebind && (prior.coreVersion !== binding.coreVersion || prior.schemaVersion !== binding.schemaVersion || JSON.stringify(prior.protocol) !== JSON.stringify(binding.protocol))) throw new Error('Server capability versions changed; pass --rebind to confirm the updated binding.');
-  if (prior && !input.rebind && prior.endpoint !== binding.endpoint) throw new Error('Workspace MCP endpoint changed; pass --rebind to confirm.');
-  if (prior && !input.rebind && fields.every(field => prior[field] === binding[field]) && prior.coreVersion === binding.coreVersion && prior.schemaVersion === binding.schemaVersion && JSON.stringify(prior.protocol) === JSON.stringify(binding.protocol) && prior.endpoint === binding.endpoint) return { binding: prior, rebound: false, alreadyBound: true };
+  const sameCore = Boolean(prior && fields.every(field => prior[field] === binding[field]) && prior.coreVersion === binding.coreVersion && prior.schemaVersion === binding.schemaVersion && JSON.stringify(prior.protocol) === JSON.stringify(binding.protocol) && prior.endpoint === binding.endpoint);
+  if (prior && !input.rebind && !sameCore) throw new Error('Workspace binding differs from the current server or checkout; pass --rebind to confirm.');
+  if (sameCore) {
+    if (JSON.stringify(prior?.context) === JSON.stringify(context)) return { binding, rebound: false, alreadyBound: true };
+    old.binding = binding;
+    await writeFile(file, `${JSON.stringify(old, null, 2)}\n`);
+    return { binding, rebound: false, alreadyBound: true, contextUpdated: true };
+  }
   old.binding = binding;
   await writeFile(file, `${JSON.stringify(old, null, 2)}\n`);
   return { binding, rebound: Boolean(prior && input.rebind) };
@@ -506,21 +588,28 @@ function endpointFor(profile: AuthProfile, override?: string): URL {
   return url;
 }
 
-export type PlatformApi = { origin: string; token: string; fetcher: Fetcher; get(route: string, init?: RequestInit): Promise<any> };
+export type PlatformApi = { origin: string; token: string; fetcher: Fetcher; get(route: string, init?: RequestInit): Promise<any>; post(route: string, body: unknown, init?: RequestInit): Promise<any>; patch(route: string, body: unknown, init?: RequestInit): Promise<any> };
 export async function platformApi(server?: string, options: { allowFileStore?: boolean; fetch?: Fetcher; store?: CredentialStore; loadStore?: () => Promise<CredentialStore> } = {}): Promise<PlatformApi> {
   const { profile, token } = await resolveCredential({ server, allowFileStore: options.allowFileStore, fetch: options.fetch, store: options.store, loadStore: options.loadStore });
   const fetcher = options.fetch ?? fetch;
+  const send = async (route: string, init: RequestInit) => {
+    const response = await fetcher(`${profile.origin}${route}`, { ...init, headers: { Authorization: `Bearer ${token}`, ...(init.headers ?? {}) } });
+    if (response.status === 401) throw new Error('Notchlet rejected the login session. Run `notchlet auth login` again.');
+    if (response.status === 403) throw new Error('This account does not have access to the selected Notchlet resource.');
+    if (!response.ok) {
+      let detail = `Notchlet API request failed with HTTP ${response.status}.`;
+      try { const payload = await response.json() as any; if (typeof payload?.message === 'string') detail = payload.message; } catch { /* keep status message */ }
+      throw Object.assign(new Error(detail), { status: response.status });
+    }
+    return response.status === 204 ? undefined : response.json();
+  };
   return {
     origin: profile.origin,
     token,
     fetcher,
-    async get(route, init = {}) {
-      const response = await fetcher(`${profile.origin}${route}`, { ...init, headers: { Authorization: `Bearer ${token}`, ...(init.headers ?? {}) } });
-      if (response.status === 401) throw new Error('Notchlet rejected the login session. Run `notchlet auth login` again.');
-      if (response.status === 403) throw new Error('This account does not have access to the selected Notchlet resource.');
-      if (!response.ok) throw new Error(`Notchlet API request failed with HTTP ${response.status}.`);
-      return response.status === 204 ? undefined : response.json();
-    },
+    get: (route, init = {}) => send(route, init),
+    post: (route, body, init = {}) => send(route, { method: 'POST', ...init, headers: { 'Content-Type': 'application/json', ...(init.headers ?? {}) }, body: JSON.stringify(body) }),
+    patch: (route, body, init = {}) => send(route, { method: 'PATCH', ...init, headers: { 'Content-Type': 'application/json', ...(init.headers ?? {}) }, body: JSON.stringify(body) }),
   };
 }
 

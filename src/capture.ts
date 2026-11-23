@@ -16,6 +16,9 @@ export interface CaptureResult {
   fullPage: boolean;
   selectors: Record<string, boolean>;
   visible: Record<string, boolean>;
+  hidden: Record<string, boolean>;
+  hiddenPresent: Record<string, boolean>;
+  absent: Record<string, boolean>;
   enabled: Record<string, boolean>;
   scopedText: Record<string, string | null>;
   steps: CaptureStepResult[];
@@ -36,6 +39,8 @@ export interface CaptureOptions {
   fullPage?: boolean;
   selectors?: string[];
   visibleSelectors?: string[];
+  hiddenSelectors?: string[];
+  absentSelectors?: string[];
   enabledSelectors?: string[];
   scopedText?: ScopedTextExpectation[];
   steps?: UiStep[];
@@ -583,6 +588,16 @@ export async function capturePage(options: CaptureOptions): Promise<CaptureResul
     for (const selector of options.visibleSelectors ?? []) {
       visible[selector] = await evaluate(connection, sessionId, VISIBILITY_EXPRESSION(selector), remaining()).catch(() => false) === true;
     }
+    const hidden: Record<string, boolean> = {};
+    const hiddenPresent: Record<string, boolean> = {};
+    for (const selector of options.hiddenSelectors ?? []) {
+      hiddenPresent[selector] = await evaluate(connection, sessionId, `Boolean(document.querySelector(${JSON.stringify(selector)}))`, remaining()).catch(() => false) === true;
+      hidden[selector] = await evaluate(connection, sessionId, VISIBILITY_EXPRESSION(selector), remaining()).then(value => value !== true).catch(() => false);
+    }
+    const absent: Record<string, boolean> = {};
+    for (const selector of options.absentSelectors ?? []) {
+      absent[selector] = await evaluate(connection, sessionId, `Boolean(document.querySelector(${JSON.stringify(selector)}))`, remaining()).then(value => value !== true).catch(() => false);
+    }
     const enabled: Record<string, boolean> = {};
     for (const selector of options.enabledSelectors ?? []) {
       enabled[selector] = await evaluate(connection, sessionId, ENABLED_EXPRESSION(selector), remaining()).catch(() => false) === true;
@@ -606,6 +621,9 @@ export async function capturePage(options: CaptureOptions): Promise<CaptureResul
       fullPage,
       selectors,
       visible,
+      hidden,
+      hiddenPresent,
+      absent,
       enabled,
       scopedText,
       steps,

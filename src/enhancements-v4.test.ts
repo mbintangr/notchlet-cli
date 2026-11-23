@@ -134,6 +134,15 @@ server.listen(${port}, '127.0.0.1', () => console.log('ready'));
     const failedAssertion = failed.envelope.data.verification.results[0].assertions.find((assertion: any) => !assertion.passed);
     assert.equal(failedAssertion.path, '$.summary.total');
     assert.match(failedAssertion.observed, /13/);
+
+    await saveChange(file, { ...change, checks: [{ ...check, expectedJsonContains: { items: [] }, expectedJsonAt: [] }] });
+    const emptyContainment = run(dir, ['verify', id]);
+    assert.equal(emptyContainment.status, 1);
+    assert.equal(emptyContainment.envelope.data.verification.outcome, 'failed');
+    const emptyAssertion = emptyContainment.envelope.data.verification.results[0].assertions.find((assertion: any) => !assertion.passed);
+    assert.equal(emptyAssertion.path, '$.items.length');
+    assert.equal(emptyAssertion.expected, '0');
+    assert.match(emptyAssertion.observed, /2/);
   } finally {
     for (const server of childServers) {
       server.kill();

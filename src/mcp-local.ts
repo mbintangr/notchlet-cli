@@ -6,11 +6,14 @@ import { readFile } from 'node:fs/promises';
 import type { Readable, Writable } from 'node:stream';
 import {
   addCheckToChange, addDesignDecisionToChange, addRequirementToChange, addScenarioToChange, addTaskToChange,
-  appendEvidence, applyChangeUpdate, authorCapabilityDeltaOperation, captureCapabilityBaseline, changeItemPatchFields, coverageEvidenceFrom, deleteCapabilityDeltaOperation,
-  evaluateState, evaluateVerificationFacets, findWorkspace, inspectChangeArtifacts, inspectEvidence, instructions,
-  listChanges, mutateChange, parseChangeOperations, persistChangeOperations, readChange, readiness, removeChangeItem, resolveEvidenceScope, scaffold, transitionTask,
+  appendEvidence, applyChangeUpdate, assertLeafAuthorable, authorCapabilityDeltaOperation, buildChangeTree, buildNode,
+  captureCapabilityBaseline, changeItemPatchFields, coverageEvidenceFrom, deleteCapabilityDeltaOperation,
+  evaluateState, evaluateVerificationFacets, findWorkspace, flattenTree, inspectChangeArtifacts, inspectEvidence, instructions,
+  listChanges, mutateChange, parseChangeOperations, persistChangeOperations, readChange, readiness, removeChangeItem, resolveChangeLocation,
+  resolveEvidenceScope, scaffold, scaffoldNode, transitionTask, treeCounts,
   updateChangeItem, verificationRecovery, WorkflowError, writeChangeArtifacts,
-  type Change, type ChangeCollection, type ChangeItemKind, type ChangeItemPatch, type EvidenceFilter, type EvidenceWriteInput, type TaskStatus, type WorkflowAction, type VerificationFacets,
+  type BacklogItemType, type Change, type ChangeCollection, type ChangeItemKind, type ChangeItemPatch, type ChangeTreeNode,
+  type EvidenceFilter, type EvidenceWriteInput, type TaskStatus, type WorkflowAction, type VerificationFacets,
 } from '@notchlet/core';
 import { persistVerificationLog, runChecks, summarizeVerification } from './verify.js';
 
@@ -26,10 +29,11 @@ function textResult(value: unknown, isError = false) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }], ...(isError ? { isError: true } : {}) };
 }
 
-async function artifactContents(root: string, id: string, change: Change): Promise<Record<string, string>> {
+async function artifactContents(root: string, ref: string, change: Change): Promise<Record<string, string>> {
+  const directory = (await resolveChangeLocation(root, ref, { scope: 'merged' })).directory;
   const result: Record<string, string> = {};
   for (const relative of Object.values(change.artifacts)) {
-    try { result[relative] = await readFile(path.join(root, '.notchlet', 'changes', id, relative), 'utf8'); }
+    try { result[relative] = await readFile(path.join(directory, relative), 'utf8'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
   return result;
@@ -40,13 +44,34 @@ async function verificationFacets(root: string, id: string, change: Change) {
 }
 
 async function resolveChangeId(root: string, input: string): Promise<string> {
-  const changes = await listChanges(root);
-  const exact = changes.find(change => change.id === input);
-  if (exact) return exact.id;
-  const matches = changes.filter(change => change.name.toLocaleLowerCase() === input.toLocaleLowerCase());
-  if (matches.length === 1) return matches[0].id;
-  if (matches.length > 1) throw new Error(`Change name "${input}" is ambiguous. Use a change ID.`);
-  throw new Error(`No change matched "${input}". Use notchlet_change_list and pass a change ID or exact name.`);
+  try { return (await resolveChangeLocation(root, input, { scope: 'active' })).relativePath; }
+  catch (error) {
+    if (error instanceof WorkflowError) throw new Error(`${error.message} Use notchlet_change_list to find a change ID, name, or relative path.`);
+    throw error;
+  }
+}
+
+async function assertLeafTools(root: string, ref: string, operation: string): Promise<void> {
+  assertLeafAuthorable(await buildNode(root, ref), operation);
+}
+
+function compactTreeNode(node: ChangeTreeNode, remainingDepth?: number): Record<string, unknown> {
+  return {
+    relativePath: node.relativePath,
+    id: node.id,
+    name: node.name,
+    scope: node.scope,
+    status: node.closed ? 'done' : node.status,
+    closed: node.closed,
+    backlog: node.backlog ? {
+      itemType: node.backlog.node.itemType,
+      title: node.backlog.node.title,
+      key: node.backlog.platform.key ?? null,
+      itemId: node.backlog.platform.itemId ?? null,
+      sync: node.backlog.sync.state,
+    } : null,
+    ...(remainingDepth === undefined || remainingDepth > 1 ? { children: node.children.map(child => compactTreeNode(child, remainingDepth === undefined ? undefined : remainingDepth - 1)) } : {}),
+  };
 }
 
 function stringArg(args: JsonObject, name: string, required = true): string | undefined {
@@ -65,6 +90,12 @@ function stringListArg(args: JsonObject, name: string): string[] | undefined {
   if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || !item.trim())) throw new Error(`Argument ${name} must be an array of non-empty strings.`);
   return value as string[];
 }
+function objectListArg(args: JsonObject, name: string): Array<Record<string, unknown>> | undefined {
+  const value = args[name];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some(item => !item || typeof item !== 'object' || Array.isArray(item))) throw new Error(`Argument ${name} must be an array of objects.`);
+  return value as Array<Record<string, unknown>>;
+}
 
 const tool = (name: string, description: string, properties: JsonObject, required: string[] = []) => ({
   name, description, inputSchema: { type: 'object' as const, properties, ...(required.length ? { required } : {}), additionalProperties: false },
@@ -74,13 +105,21 @@ const tools = [
   tool('notchlet_workspace_status', 'Show local workspace changes with readiness and task progress. Pass changeId for full state.', {
     changeId: { type: 'string', description: 'Optional change ID or exact name' },
   }),
-  tool('notchlet_change_list', 'List local changes with task counts and readiness.', {}),
+  tool('notchlet_change_list', 'List local changes with task counts, readiness, and relative hierarchy paths.', {}),
+  tool('notchlet_change_tree', 'Show the local backlog hierarchy with derived status and counts; pass a change reference to scope to one subtree.', {
+    changeId: { type: 'string', description: 'Optional change ID, name, or relative path; defaults to the whole workspace' },
+    depth: { type: 'number', description: 'Optional maximum depth to include (1 = node only)' },
+  }),
   tool('notchlet_change_get', 'Read one change, its readiness blockers, derived state, and verification status.', {
-    changeId: { type: 'string', description: 'Change ID or exact name' },
+    changeId: { type: 'string', description: 'Change ID, name, or relative path' },
   }, ['changeId']),
-  tool('notchlet_change_create', 'Create a local change. Quick mode needs no design artifacts; standard mode scaffolds design.md.', {
+  tool('notchlet_change_create', 'Create a local change. Quick mode needs no design artifacts; standard mode scaffolds design.md. Pass changeType (and parent for non-epics) to create a backlog node.', {
     name: { type: 'string', description: 'Human-readable change name' },
     mode: { type: 'string', enum: ['quick', 'standard'], description: 'Defaults to quick' },
+    changeType: { type: 'string', enum: ['epic', 'story', 'task', 'subtask'], description: 'Backlog node type; stories/tasks/subtasks require parent' },
+    parent: { type: 'string', description: 'Parent change ID, name, or relative path; requires changeType' },
+    title: { type: 'string', description: 'Backlog node title; defaults to name' },
+    slug: { type: 'string', description: 'Folder slug; defaults to the title slug' },
   }, ['name']),
   tool('notchlet_change_update', 'Update the change intent, outcome, or capability declaration, or edit one authored item in place with kind and itemId. Revision is bumped atomically; pass revision to reject a stale write.', {
     changeId: { type: 'string' },
@@ -100,7 +139,15 @@ const tools = [
     waitFor: { type: 'string', description: 'UI check: selector that must render before capture' },
     settleMs: { type: 'number', description: 'UI check: settle delay after load before capture' },
     expectedSelectors: { type: 'array', items: { type: 'string' }, description: 'UI check: selectors that must exist in the rendered DOM' },
+    expectedVisibleSelectors: { type: 'array', items: { type: 'string' }, description: 'UI check: selectors that must be present and visibly rendered' },
+    expectedHiddenSelectors: { type: 'array', items: { type: 'string' }, description: 'UI check: selectors that must not be visibly rendered' },
+    expectedAbsentSelectors: { type: 'array', items: { type: 'string' }, description: 'UI check: selectors that must be absent from the DOM; present-but-hidden fails' },
+    expectedEnabledSelectors: { type: 'array', items: { type: 'string' }, description: 'UI check: selectors that must be present and enabled' },
     expectedText: { type: 'string', description: 'UI check: text that must appear in rendered content' },
+    expectedTitle: { type: 'string', description: 'UI check: exact document title' },
+    expectedScopedText: { type: 'array', items: { type: 'object' }, description: 'UI check: [{selector, contains}] scoped text assertions' },
+    steps: { type: 'array', items: { type: 'object' }, description: 'UI check: ordered interaction steps, for example {action:"click",selector:"#save"}' },
+    captureArtifacts: { type: 'string', enum: ['never', 'on-failure', 'always'], description: 'UI check: capture policy' },
     expectedNoConsoleErrors: { type: 'boolean', description: 'UI check: fail when the page logs console errors' },
     fullPage: { type: 'boolean', description: 'UI check: capture the full scrollable page' },
     requirementId: { type: 'string', description: 'Scenario requirement link' },
@@ -126,7 +173,15 @@ const tools = [
     waitFor: { type: 'string', description: 'UI check: selector that must render before capture' },
     settleMs: { type: 'number', description: 'UI check: settle delay after load before capture' },
     expectedSelectors: { type: 'array', items: { type: 'string' }, description: 'UI check: selectors that must exist in the rendered DOM' },
+    expectedVisibleSelectors: { type: 'array', items: { type: 'string' }, description: 'UI check: selectors that must be present and visibly rendered' },
+    expectedHiddenSelectors: { type: 'array', items: { type: 'string' }, description: 'UI check: selectors that must not be visibly rendered' },
+    expectedAbsentSelectors: { type: 'array', items: { type: 'string' }, description: 'UI check: selectors that must be absent from the DOM; present-but-hidden fails' },
+    expectedEnabledSelectors: { type: 'array', items: { type: 'string' }, description: 'UI check: selectors that must be present and enabled' },
     expectedText: { type: 'string', description: 'UI check: text that must appear in rendered content' },
+    expectedTitle: { type: 'string', description: 'UI check: exact document title' },
+    expectedScopedText: { type: 'array', items: { type: 'object' }, description: 'UI check: [{selector, contains}] scoped text assertions' },
+    steps: { type: 'array', items: { type: 'object' }, description: 'UI check: ordered interaction steps, for example {action:"click",selector:"#save"}' },
+    captureArtifacts: { type: 'string', enum: ['never', 'on-failure', 'always'], description: 'UI check: capture policy' },
     expectedNoConsoleErrors: { type: 'boolean', description: 'UI check: fail when the page logs console errors' },
     fullPage: { type: 'boolean', description: 'UI check: capture the full scrollable page' },
     requirementId: { type: 'string', description: 'Scenario requirement link' },
@@ -247,7 +302,7 @@ function revisionArg(args: JsonObject): number | undefined {
   return args.revision;
 }
 
-const PATCH_FIELDS = ['title', 'description', 'command', 'url', 'expectedStatus', 'waitFor', 'settleMs', 'expectedSelectors', 'expectedText', 'expectedNoConsoleErrors', 'fullPage', 'requirementId', 'when', 'then', 'decision', 'rationale', 'dependencies', 'requirementIds', 'taskIds', 'kind'];
+const PATCH_FIELDS = ['title', 'description', 'command', 'url', 'expectedStatus', 'waitFor', 'settleMs', 'expectedSelectors', 'expectedVisibleSelectors', 'expectedHiddenSelectors', 'expectedAbsentSelectors', 'expectedEnabledSelectors', 'expectedText', 'expectedTitle', 'expectedScopedText', 'steps', 'captureArtifacts', 'expectedNoConsoleErrors', 'fullPage', 'requirementId', 'when', 'then', 'decision', 'rationale', 'dependencies', 'requirementIds', 'taskIds', 'kind'];
 
 function booleanArg(args: JsonObject, name: string): boolean | undefined {
   const value = args[name];
@@ -285,8 +340,14 @@ function itemPatchArg(kind: ChangeItemKind, args: JsonObject): ChangeItemPatch {
     } else if (field === 'expectedNoConsoleErrors' || field === 'fullPage') {
       if (typeof value !== 'boolean') throw new Error(`${field} must be a boolean.`);
       patch[field] = value;
-    } else if (field === 'dependencies' || field === 'requirementIds' || field === 'taskIds' || field === 'expectedSelectors') {
+    } else if (field === 'dependencies' || field === 'requirementIds' || field === 'taskIds' || field === 'expectedSelectors' || field === 'expectedVisibleSelectors' || field === 'expectedHiddenSelectors' || field === 'expectedAbsentSelectors' || field === 'expectedEnabledSelectors') {
       patch[field] = stringListArg(args, field)!;
+    } else if (field === 'expectedScopedText' || field === 'steps') {
+      patch[field] = objectListArg(args, field)!;
+    } else if (field === 'captureArtifacts') {
+      const policy = stringArg(args, field)!;
+      if (!['never', 'on-failure', 'always'].includes(policy)) throw new Error('captureArtifacts must be never, on-failure, or always.');
+      patch[field] = policy;
     } else if (field === 'kind') {
       patch[field] = stringArg(args, 'checkKind')!;
     } else {
@@ -306,9 +367,10 @@ async function callTool(root: string, name: string, args: JsonObject): Promise<u
     const contents = await artifactContents(root, changeId, change);
     const facets = await verificationFacets(root, changeId, change);
     const recoverable = [...facets.missing, ...facets.failed, ...facets.stale, ...facets.unknown];
+    const rollup = (await buildNode(root, changeId)).children.length > 0;
     return {
       change,
-      readiness: readiness(change, contents, coverageEvidenceFrom(facets)),
+      readiness: readiness(change, contents, coverageEvidenceFrom(facets), rollup ? { rollup: true } : {}),
       state: evaluateState(change, { ...facets, coverageEvidence: coverageEvidenceFrom(facets) }, contents),
       verification: facets,
       ...(recoverable.length ? { recovery: verificationRecovery(changeId, recoverable) } : {}),
@@ -316,9 +378,41 @@ async function callTool(root: string, name: string, args: JsonObject): Promise<u
   }
   if (name === 'notchlet_change_list') return { changes: await listChanges(root) };
 
+  if (name === 'notchlet_change_tree') {
+    const depth = args.depth;
+    if (depth !== undefined && (typeof depth !== 'number' || !Number.isInteger(depth) || depth < 1)) throw new Error('depth must be a positive integer.');
+    const depthLimit = depth === undefined ? undefined : depth;
+    const tree = await buildChangeTree(root);
+    if (typeof args.changeId !== 'string' || !args.changeId.trim()) {
+      return { counts: tree.counts, warnings: tree.warnings, roots: tree.roots.map(node => compactTreeNode(node, depthLimit)) };
+    }
+    const node = await buildNode(root, args.changeId);
+    return { relativePath: node.relativePath, counts: treeCounts(flattenTree(node)), warnings: tree.warnings, node: compactTreeNode(node, depthLimit) };
+  }
+
   if (name === 'notchlet_change_create') {
     const mode = args.mode === 'standard' ? 'standard' : 'quick';
-    return { change: await scaffold(root, stringArg(args, 'name')!, mode) };
+    const nameArg = stringArg(args, 'name')!;
+    const typeInput = stringArg(args, 'changeType', false)?.toLowerCase();
+    const parent = stringArg(args, 'parent', false);
+    const title = stringArg(args, 'title', false);
+    const slug = stringArg(args, 'slug', false);
+    if (!typeInput) {
+      if (parent !== undefined || title !== undefined || slug !== undefined) throw new Error('changeType is required when using parent, title, or slug.');
+      return { change: await scaffold(root, nameArg, mode) };
+    }
+    if (!['epic', 'story', 'task', 'subtask'].includes(typeInput)) throw new Error('changeType must be epic, story, task, or subtask.');
+    if (typeInput !== 'epic' && parent === undefined) throw new Error(`changeType ${typeInput} requires a parent.`);
+    if (typeInput === 'epic' && parent !== undefined) throw new Error('An epic cannot have a parent.');
+    const result = await scaffoldNode(root, {
+      name: nameArg,
+      itemType: typeInput.toUpperCase() as BacklogItemType,
+      mode,
+      ...(parent === undefined ? {} : { parent }),
+      ...(title === undefined ? {} : { title }),
+      ...(slug === undefined ? {} : { slug }),
+    });
+    return { change: result.change, relativePath: result.relativePath, backlog: result.backlog };
   }
 
   const changeIdInput = stringArg(args, 'changeId');
@@ -330,9 +424,10 @@ async function callTool(root: string, name: string, args: JsonObject): Promise<u
     const contents = await artifactContents(root, changeId, change);
     const facets = await verificationFacets(root, changeId, change);
     const recoverable = [...facets.missing, ...facets.failed, ...facets.stale, ...facets.unknown];
+    const rollup = (await buildNode(root, changeId)).children.length > 0;
     return {
       change,
-      readiness: readiness(change, contents, coverageEvidenceFrom(facets)),
+      readiness: readiness(change, contents, coverageEvidenceFrom(facets), rollup ? { rollup: true } : {}),
       state: evaluateState(change, { ...facets, coverageEvidence: coverageEvidenceFrom(facets) }, contents),
       verification: facets,
       ...(recoverable.length ? { recovery: verificationRecovery(changeId, recoverable) } : {}),
@@ -351,6 +446,7 @@ async function callTool(root: string, name: string, args: JsonObject): Promise<u
       if (!kindInput) throw new Error('itemId requires kind.');
       if (!itemId) throw new Error('kind requires itemId.');
       const kind = collectionKind(kindInput);
+      if (kind === 'task') await assertLeafTools(root, changeId, 'edit tasks');
       const patch = itemPatchArg(kind, args);
       return { change: await mutateChange(root, changeId, change => updateChangeItem(change, kind, itemId, patch), revision === undefined ? {} : { expectedRevision: revision }) };
     }
@@ -385,6 +481,7 @@ async function callTool(root: string, name: string, args: JsonObject): Promise<u
   if (name === 'notchlet_change_add') {
     const kind = stringArg(args, 'kind')!;
     const id = stringArg(args, 'id')!;
+    if (kind === 'task') await assertLeafTools(root, changeId, 'add tasks');
     const revision = revisionArg(args);
     const change = await mutateChange(root, changeId, current => {
       if (kind === 'requirement') return addRequirementToChange(current, { id, title: stringArg(args, 'title') ?? id, description: stringArg(args, 'description') ?? stringArg(args, 'title') ?? id });
@@ -396,7 +493,16 @@ async function callTool(root: string, name: string, args: JsonObject): Promise<u
         const waitFor = stringArg(args, 'waitFor', false);
         const settleMs = nonNegativeIntegerArg(args, 'settleMs');
         const expectedSelectors = stringListArg(args, 'expectedSelectors');
+        const expectedVisibleSelectors = stringListArg(args, 'expectedVisibleSelectors');
+        const expectedHiddenSelectors = stringListArg(args, 'expectedHiddenSelectors');
+        const expectedAbsentSelectors = stringListArg(args, 'expectedAbsentSelectors');
+        const expectedEnabledSelectors = stringListArg(args, 'expectedEnabledSelectors');
         const expectedText = stringArg(args, 'expectedText', false);
+        const expectedTitle = stringArg(args, 'expectedTitle', false);
+        const expectedScopedText = objectListArg(args, 'expectedScopedText');
+        const steps = objectListArg(args, 'steps');
+        const captureArtifacts = stringArg(args, 'captureArtifacts', false);
+        if (captureArtifacts !== undefined && !['never', 'on-failure', 'always'].includes(captureArtifacts)) throw new Error('captureArtifacts must be never, on-failure, or always.');
         const expectedNoConsoleErrors = booleanArg(args, 'expectedNoConsoleErrors');
         const fullPage = booleanArg(args, 'fullPage');
         return addCheckToChange(current, {
@@ -409,7 +515,15 @@ async function callTool(root: string, name: string, args: JsonObject): Promise<u
           ...(waitFor === undefined ? {} : { waitFor }),
           ...(settleMs === undefined ? {} : { settleMs }),
           ...(expectedSelectors?.length ? { expectedSelectors } : {}),
+          ...(expectedVisibleSelectors?.length ? { expectedVisibleSelectors } : {}),
+          ...(expectedHiddenSelectors?.length ? { expectedHiddenSelectors } : {}),
+          ...(expectedAbsentSelectors?.length ? { expectedAbsentSelectors } : {}),
+          ...(expectedEnabledSelectors?.length ? { expectedEnabledSelectors } : {}),
           ...(expectedText === undefined ? {} : { expectedText }),
+          ...(expectedTitle === undefined ? {} : { expectedTitle }),
+          ...(expectedScopedText === undefined ? {} : { expectedScopedText: expectedScopedText as unknown as NonNullable<Change['checks'][number]['expectedScopedText']> }),
+          ...(steps === undefined ? {} : { steps: steps as unknown as NonNullable<Change['checks'][number]['steps']> }),
+          ...(captureArtifacts === undefined ? {} : { captureArtifacts: captureArtifacts as NonNullable<Change['checks'][number]['captureArtifacts']> }),
           ...(expectedNoConsoleErrors === undefined ? {} : { expectedNoConsoleErrors }),
           ...(fullPage === undefined ? {} : { fullPage }),
           ...(requirementIds?.length ? { requirementIds } : {}),
@@ -426,20 +540,25 @@ async function callTool(root: string, name: string, args: JsonObject): Promise<u
   if (name === 'notchlet_change_apply') {
     const revision = revisionArg(args);
     const operations = parseChangeOperations(args.operations);
+    if (operations.some(operation => 'kind' in operation && operation.kind === 'task')) await assertLeafTools(root, changeId, 'edit tasks');
     return persistChangeOperations(root, changeId, operations, revision === undefined ? {} : { expectedRevision: revision });
   }
   if (name === 'notchlet_change_remove') {
+    const kind = stringArg(args, 'kind')!;
+    if (collectionKind(kind) === 'task') await assertLeafTools(root, changeId, 'remove tasks');
     const revision = revisionArg(args);
-    return { change: await removeChangeItem(root, changeId, collectionFor(stringArg(args, 'kind')!), stringArg(args, 'itemId')!, revision === undefined ? {} : { expectedRevision: revision }) };
+    return { change: await removeChangeItem(root, changeId, collectionFor(kind), stringArg(args, 'itemId')!, revision === undefined ? {} : { expectedRevision: revision }) };
   }
   if (name === 'notchlet_task_transition') {
     const taskId = stringArg(args, 'taskId')!;
     const status = stringArg(args, 'status')!;
     if (!['pending', 'in_progress', 'completed'].includes(status)) throw new Error('status must be pending, in_progress, or completed.');
+    await assertLeafTools(root, changeId, 'transition tasks');
     const change = await readChange(root, changeId);
     if (!change.tasks.some(task => task.id === taskId)) throw new Error(`No task "${taskId}" in change ${changeId}.`);
     const revision = typeof args.revision === 'number' ? args.revision : (change.revision ?? 0);
-    const transitioned = await transitionTask(path.join(root, '.notchlet', 'changes', changeId, 'tasks.json'), taskId, status as TaskStatus, revision, { force: args.force === true, requireEvidence: args.requireEvidence === true });
+    const directory = (await resolveChangeLocation(root, changeId, { scope: 'active' })).directory;
+    const transitioned = await transitionTask(path.join(directory, 'tasks.json'), taskId, status as TaskStatus, revision, { force: args.force === true, requireEvidence: args.requireEvidence === true });
     const { warnings = [], ...updated } = transitioned;
     return { change: updated, warnings };
   }
@@ -473,6 +592,7 @@ async function callTool(root: string, name: string, args: JsonObject): Promise<u
       ...(fullPage === undefined ? {} : { fullPage }),
     };
     const result = await runChecks(root, change, {
+      changeRef: changeId,
       ...(checkIds?.length ? { checkIds } : {}),
       ...(timeoutMs ? { timeoutMs } : {}),
       ...(workingDirectory === undefined ? {} : { workingDirectory }),

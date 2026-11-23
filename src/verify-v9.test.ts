@@ -226,6 +226,10 @@ test('a failed preflight persists a diagnostic log and recovery without --record
     assert.match(failedHuman.stdout, /Preflight recovery: Fix/);
     assert.match(failedHuman.stdout, /Diagnostic log: \.notchlet\/changes\//);
     assert.match(failedHuman.stdout, /setup exits 0 then 0/);
+    assert.match(failedHuman.stdout, /Observation basis: artifact \(non-Git; source binding is recorded per evidence\)/);
+    const showHuman = runHuman(dir, ['change', 'show', id]);
+    assert.equal(showHuman.status, 0, showHuman.stderr);
+    assert.match(showHuman.stdout, /Observation basis: artifact \(non-Git; source binding is recorded per evidence\)/);
   } finally { await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
 });
 

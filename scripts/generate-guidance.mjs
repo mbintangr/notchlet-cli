@@ -65,8 +65,12 @@ const requiredTools = {
   development_delivery_create: ['changeId', 'expectedRevision', 'operationId', 'payloadHash', 'snapshotRevision', 'target', 'backlogStatus', 'repositoryRef', 'summary'],
 };
 for (const [name, args] of Object.entries(requiredTools)) {
-  const definition = toolSources.flatMap(text => text.split(/\r?\n/)).find(line => line.includes(`name: '${name}'`));
-  if (!definition) throw new Error(`Guidance references an MCP tool not registered by the server: ${name}`);
+  const toolLines = toolSources.flatMap(text => text.split(/\r?\n/));
+  const nameIndex = toolLines.findIndex(line => line.includes(`name: '${name}'`));
+  if (nameIndex < 0) throw new Error(`Guidance references an MCP tool not registered by the server: ${name}`);
+  // The tool's schema may be prettier-wrapped across lines; its definition ends at the next registered tool.
+  const nextNameIndex = toolLines.findIndex((line, index) => index > nameIndex && /name: '[a-z_]+'/.test(line));
+  const definition = toolLines.slice(nameIndex, nextNameIndex < 0 ? undefined : nextNameIndex).join('\n');
   for (const arg of args) if (!definition.includes(arg)) throw new Error(`Guidance references unsupported ${name} argument: ${arg}`);
 }
 const developmentToolSource = toolSources[1];

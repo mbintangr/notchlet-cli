@@ -428,6 +428,8 @@ test('sync push sends the imported backlog item and bound repository, and link u
     const create = f.remote.requests.find(r => r.path === '/development/v1/changes' && r.method === 'POST');
     assert.equal(create.body.backlogItemId, 1518);
     assert.equal(create.body.repositoryId, 7);
+    assert.ok(typeof create.body.description === 'string' && create.body.description.length > 0, 'the dev change description is derived from the change, never empty');
+    assert.match(create.body.description, /Linked change/);
     const linked = await linkChange(f.root, change.id, { backlogItemId: 1518, repositoryId: 7 }, { server: f.server, fetch: f.fetcher });
     assert.equal(linked.state, 'linked');
     assert.equal(linked.change.backlogItemId, 1518);

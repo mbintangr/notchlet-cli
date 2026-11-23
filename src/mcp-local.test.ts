@@ -186,6 +186,98 @@ test('offline MCP server captures baselines and authors revision-checked delta o
   }
 });
 
+test('offline MCP scaffolds backlog trees, resolves relative refs, and guards rollups', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'notchlet-local-mcp-tree-'));
+  const { client, close } = await connect(dir);
+  try {
+    await initWorkspace(dir);
+    const names = (await client.listTools()).tools.map(tool => tool.name);
+    assert.ok(names.includes('notchlet_change_tree'));
+
+    const epic = payload(await client.callTool({ name: 'notchlet_change_create', arguments: { name: 'Platform work', changeType: 'epic', mode: 'quick' } })) as any;
+    assert.equal(epic.relativePath, 'platform-work');
+    assert.equal(epic.backlog.node.itemType, 'EPIC');
+    const story = payload(await client.callTool({ name: 'notchlet_change_create', arguments: { name: 'Login', changeType: 'story', parent: 'platform-work', title: 'Login flow', slug: 'login' } })) as any;
+    assert.equal(story.relativePath, 'platform-work/login');
+    assert.equal(story.backlog.node.itemType, 'STORY');
+
+    const missingParent = await client.callTool({ name: 'notchlet_change_create', arguments: { name: 'Orphan', changeType: 'story' } });
+    assert.equal(missingParent.isError, true);
+    assert.match(payload(missingParent).error, /requires a parent/);
+
+    const got = payload(await client.callTool({ name: 'notchlet_change_get', arguments: { changeId: 'platform-work/login' } })) as any;
+    assert.equal(got.change.name, 'Login flow');
+
+    const tree = payload(await client.callTool({ name: 'notchlet_change_tree', arguments: {} })) as any;
+    assert.equal(tree.counts.total, 2);
+    assert.equal(tree.counts.leaves, 1);
+    assert.equal(tree.roots[0].relativePath, 'platform-work');
+    assert.equal(tree.roots[0].children[0].relativePath, 'platform-work/login');
+
+    const scoped = payload(await client.callTool({ name: 'notchlet_change_tree', arguments: { changeId: 'platform-work', depth: 1 } })) as any;
+    assert.equal(scoped.counts.total, 2);
+    assert.equal(scoped.node.children, undefined);
+
+    for (const call of [
+      { name: 'notchlet_change_add', arguments: { changeId: 'platform-work', kind: 'task', id: 'TASK-1', title: 'Nope' } },
+      { name: 'notchlet_task_transition', arguments: { changeId: 'platform-work', taskId: 'TASK-1', status: 'in_progress' } },
+    ]) {
+      const rejected = await client.callTool(call as any);
+      assert.equal(rejected.isError, true);
+      assert.equal(payload(rejected).code, 'rollup_node');
+    }
+
+    payload(await client.callTool({ name: 'notchlet_change_add', arguments: { changeId: 'platform-work/login', kind: 'task', id: 'TASK-1', title: 'Implement login' } }));
+    const leaf = payload(await client.callTool({ name: 'notchlet_change_get', arguments: { changeId: 'platform-work/login' } })) as any;
+    assert.deepEqual(leaf.change.tasks.map((task: any) => task.id), ['TASK-1']);
+  } finally {
+    await close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('offline MCP authors and updates rich UI checks', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'notchlet-local-mcp-ui-'));
+  const { client, close } = await connect(dir);
+  try {
+    await initWorkspace(dir);
+    const created = payload(await client.callTool({ name: 'notchlet_change_create', arguments: { name: 'MCP UI authoring', mode: 'quick' } })) as any;
+    const id = created.change.id as string;
+
+    const authored = payload(await client.callTool({ name: 'notchlet_change_add', arguments: {
+      changeId: id, kind: 'check', id: 'CHECK-UI', description: 'Rich UI check', checkKind: 'ui',
+      url: 'http://127.0.0.1:9/form', expectedTitle: 'Form Fixture',
+      expectedScopedText: [{ selector: '#heading', contains: 'Create item' }],
+      steps: [{ action: 'assertText', selector: '#heading', text: 'Create item' }],
+      captureArtifacts: 'always',
+    } })) as any;
+    const addCheck = authored.change.checks.find((check: any) => check.id === 'CHECK-UI');
+    assert.equal(addCheck.kind, 'ui');
+    assert.equal(addCheck.expectedTitle, 'Form Fixture');
+    assert.deepEqual(addCheck.expectedScopedText, [{ selector: '#heading', contains: 'Create item' }]);
+    assert.deepEqual(addCheck.steps, [{ action: 'assertText', selector: '#heading', text: 'Create item' }]);
+    assert.equal(addCheck.captureArtifacts, 'always');
+
+    const updated = payload(await client.callTool({ name: 'notchlet_change_update', arguments: {
+      changeId: id, kind: 'check', itemId: 'CHECK-UI', expectedTitle: 'Form Fixture v2',
+      steps: [{ action: 'fill', selector: '#name', value: 'Widget' }, { action: 'click', selector: '#save' }],
+      captureArtifacts: 'on-failure',
+    } })) as any;
+    const updateCheck = updated.change.checks.find((check: any) => check.id === 'CHECK-UI');
+    assert.equal(updateCheck.expectedTitle, 'Form Fixture v2');
+    assert.deepEqual(updateCheck.steps.map((step: any) => step.action), ['fill', 'click']);
+    assert.equal(updateCheck.captureArtifacts, 'on-failure');
+    assert.deepEqual(updateCheck.expectedScopedText, [{ selector: '#heading', contains: 'Create item' }]);
+
+    const rejected = await client.callTool({ name: 'notchlet_change_update', arguments: { changeId: id, kind: 'check', itemId: 'CHECK-UI', captureArtifacts: 'sometimes' } });
+    assert.equal(rejected.isError, true);
+    assert.match(payload(rejected).error, /captureArtifacts/);
+  } finally {
+    await close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('local MCP tool descriptions state the implemented removal and verification scope', () => {
   const remove = localToolDefinitions.find(tool => tool.name === 'notchlet_change_remove');
   assert.ok(remove);

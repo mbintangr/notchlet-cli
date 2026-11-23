@@ -1,1 +1,51 @@
-{"name":"@notchlet/cli","version":"1.0.1","type":"module","engines":{"node":">=22"},"bin":{"notchlet":"./dist/cli.js"},"files":["dist/cli.js","dist/auth.js","dist/capture.js","dist/cli-format.js","dist/cli-prompt.js","dist/guidance-install.js","dist/history.js","dist/integration.js","dist/setup.js","dist/verify.js","dist/mcp-config.js","dist/mcp-state.js","dist/mcp-management.js","dist/mcp-bridge.js","dist/mcp-onboarding.js","guidance","scripts/generate-guidance.mjs"],"scripts":{"build":"tsc -p tsconfig.json","test":"npm run build && node --test dist/*.test.js","prepublishOnly":"npm test","guidance:generate":"node scripts/generate-guidance.mjs"},"dependencies":{"@modelcontextprotocol/sdk":"^1.32.2","@napi-rs/keyring":"^2.1.2","@notchlet/core":"^1.0.0"},"devDependencies":{"@types/node":"^22.15.0","typescript":"^5.8.3"}}
+{
+  "name": "@notchlet/cli",
+  "version": "1.0.1",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "notchlet": "./dist/cli.js"
+  },
+  "files": [
+    "dist/cli.js",
+    "dist/tree-format.js",
+    "dist/auth.js",
+    "dist/capture.js",
+    "dist/cli-format.js",
+    "dist/cli-prompt.js",
+    "dist/guidance-install.js",
+    "dist/history.js",
+    "dist/integration.js",
+    "dist/backlog-sync.js",
+    "dist/bootstrap.js",
+    "dist/migrate.js",
+    "dist/mcp-local.js",
+    "dist/setup.js",
+    "dist/verify.js",
+    "dist/verify-tree.js",
+    "dist/mcp-config.js",
+    "dist/mcp-state.js",
+    "dist/mcp-management.js",
+    "dist/mcp-bridge.js",
+    "dist/mcp-onboarding.js",
+    "guidance",
+    "scripts/generate-guidance.mjs"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/*.test.js",
+    "prepublishOnly": "npm test",
+    "guidance:generate": "node scripts/generate-guidance.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@napi-rs/keyring": "^2.1.2",
+    "@notchlet/core": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3"
+  }
+}

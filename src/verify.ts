@@ -3,13 +3,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { copyFile, lstat, mkdir, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { resolveJsonPath, WorkflowError, type Change, type Check, type EvidenceEnvironment, type ScopedTextExpectation, type SetupPreflightEnvironment, type UiCapturePolicy } from '@notchlet/core';
+import { directoryForRelative, resolveJsonPath, WorkflowError, type Change, type Check, type EvidenceEnvironment, type ScopedTextExpectation, type SetupPreflightEnvironment, type UiCapturePolicy } from '@notchlet/core';
 import { capturePage, describeConsoleMessage, type CaptureConsoleMessage, type CaptureStepResult } from './capture.js';
 
 export type CheckStatus = 'passed' | 'failed' | 'skipped';
 export type ExecutedCheckKind = 'command' | 'http' | 'manual' | 'ui';
 export interface CheckAssertion {
-  kind: 'status' | 'body' | 'json' | 'json-contains' | 'json-path' | 'header' | 'selector' | 'text' | 'title' | 'visible' | 'enabled' | 'scoped-text' | 'step' | 'capture' | 'console';
+  kind: 'status' | 'body' | 'json' | 'json-contains' | 'json-path' | 'header' | 'selector' | 'text' | 'title' | 'visible' | 'hidden' | 'absent' | 'enabled' | 'scoped-text' | 'step' | 'capture' | 'console';
   passed: boolean;
   expected: string;
   observed: string;
@@ -34,6 +34,8 @@ export interface CheckResult {
   expectedText?: string;
   expectedTitle?: string;
   expectedVisibleSelectors?: string[];
+  expectedHiddenSelectors?: string[];
+  expectedAbsentSelectors?: string[];
   expectedEnabledSelectors?: string[];
   expectedScopedText?: ScopedTextExpectation[];
   steps?: Check['steps'];
@@ -185,6 +187,8 @@ export interface VerifyResult {
 }
 
 export interface VerifyOptions {
+  /** Workspace-relative change path; defaults to change.id for flat legacy changes. */
+  changeRef?: string;
   checkIds?: string[];
   timeoutMs?: number;
   outputLimitBytes?: number;
@@ -321,6 +325,9 @@ function jsonContainsMismatches(expected: unknown, observed: unknown, location =
   }
   if (Array.isArray(expected)) {
     if (!Array.isArray(observed)) return [{ path: location, expected: formatValue(expected), observed: formatValue(observed) }];
+    if (expected.length === 0) {
+      return observed.length === 0 ? [] : [{ path: `${location}.length`, expected: '0', observed: String(observed.length) }];
+    }
     const mismatches: Mismatch[] = [];
     for (let index = 0; index < expected.length; index++) {
       const matches = observed.some(candidate => jsonContainsMismatches(expected[index], candidate, `${location}[${index}]`).length === 0);
@@ -441,7 +448,7 @@ async function probe(check: Check, timeoutMs: number, outputLimit: number, recov
 async function archiveUiCapture(root: string, changeId: string, check: Check, page: Awaited<ReturnType<typeof capturePage>>, policy: UiCapturePolicy): Promise<NonNullable<CheckResult['capture']>> {
   const runId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;
   const safeCheck = check.id.replace(/[^a-zA-Z0-9._-]+/g, '-') || 'check';
-  const directory = path.join(path.resolve(root), '.notchlet', 'changes', changeId, 'evidence', 'captures', runId);
+  const directory = path.join(directoryForRelative(root, 'active', changeId), 'evidence', 'captures', runId);
   await mkdir(directory, { recursive: true });
   const screenshot = path.join(directory, `${safeCheck}.png`);
   const dom = path.join(directory, `${safeCheck}.html`);
@@ -480,7 +487,22 @@ function probeHints(check: Check, page: Awaited<ReturnType<typeof capturePage>>,
   return [...new Set(hints)];
 }
 
-async function probeUi(check: Check, options: VerifyOptions, timeoutMs: number, outputLimit: number, recoveryHint: string, root: string, changeId: string): Promise<Omit<CheckResult, 'id' | 'description' | 'kind' | 'command' | 'url' | 'expectedStatus' | 'expectedBodyContains' | 'expectedJson' | 'expectedJsonContains' | 'expectedJsonAt' | 'expectedHeaders' | 'waitFor' | 'settleMs' | 'expectedSelectors' | 'expectedText' | 'expectedTitle' | 'expectedVisibleSelectors' | 'expectedEnabledSelectors' | 'expectedScopedText' | 'steps' | 'captureArtifacts' | 'expectedNoConsoleErrors' | 'fullPage' | 'workingDirectory' | 'environment' | 'status'>> {
+function hiddenAbsenceHints(check: Check, page: Awaited<ReturnType<typeof capturePage>>): string[] {
+  const assertsPositiveRendering = Boolean(
+    check.expectedSelectors?.length
+    || check.expectedVisibleSelectors?.length
+    || check.expectedEnabledSelectors?.length
+    || check.expectedText?.trim()
+    || check.expectedTitle?.trim()
+    || check.expectedScopedText?.length,
+  );
+  if (!assertsPositiveRendering) return [];
+  const absent = (check.expectedHiddenSelectors ?? []).filter(selector =>
+    page.hidden[selector] === true && page.hiddenPresent[selector] === false && !(check.expectedSelectors ?? []).includes(selector) && !(check.expectedAbsentSelectors ?? []).includes(selector));
+  return absent.length ? [`hidden-absent: ${absent.join(', ')} passed because the selector is absent. If hidden-but-present was required, add expectedSelectors so presence is required as well as non-visibility.`] : [];
+}
+
+async function probeUi(check: Check, options: VerifyOptions, timeoutMs: number, outputLimit: number, recoveryHint: string, root: string, changeId: string): Promise<Omit<CheckResult, 'id' | 'description' | 'kind' | 'command' | 'url' | 'expectedStatus' | 'expectedBodyContains' | 'expectedJson' | 'expectedJsonContains' | 'expectedJsonAt' | 'expectedHeaders' | 'waitFor' | 'settleMs' | 'expectedSelectors' | 'expectedText' | 'expectedTitle' | 'expectedVisibleSelectors' | 'expectedHiddenSelectors' | 'expectedAbsentSelectors' | 'expectedEnabledSelectors' | 'expectedScopedText' | 'steps' | 'captureArtifacts' | 'expectedNoConsoleErrors' | 'fullPage' | 'workingDirectory' | 'environment' | 'status'>> {
   const started = Date.now();
   try {
     const page = await capturePage({
@@ -493,6 +515,8 @@ async function probeUi(check: Check, options: VerifyOptions, timeoutMs: number, 
       fullPage: check.fullPage ?? options.capture?.fullPage,
       selectors: check.expectedSelectors,
       ...(check.expectedVisibleSelectors === undefined ? {} : { visibleSelectors: check.expectedVisibleSelectors }),
+      ...(check.expectedHiddenSelectors === undefined ? {} : { hiddenSelectors: check.expectedHiddenSelectors }),
+      ...(check.expectedAbsentSelectors === undefined ? {} : { absentSelectors: check.expectedAbsentSelectors }),
       ...(check.expectedEnabledSelectors === undefined ? {} : { enabledSelectors: check.expectedEnabledSelectors }),
       ...(check.expectedScopedText === undefined ? {} : { scopedText: check.expectedScopedText }),
       ...(check.steps === undefined ? {} : { steps: check.steps }),
@@ -519,6 +543,15 @@ async function probeUi(check: Check, options: VerifyOptions, timeoutMs: number, 
       for (const selector of check.expectedVisibleSelectors ?? []) {
         const passed = page.visible[selector] === true;
         assertions.push({ kind: 'visible', passed, expected: `visible selector ${selector}`, observed: passed ? 'visible' : 'hidden or absent', path: selector });
+      }
+      for (const selector of check.expectedHiddenSelectors ?? []) {
+        const passed = page.hidden[selector] === true;
+        const observed = !passed ? 'visible' : page.hiddenPresent[selector] === false ? 'absent' : 'hidden';
+        assertions.push({ kind: 'hidden', passed, expected: `hidden selector ${selector}`, observed, path: selector });
+      }
+      for (const selector of check.expectedAbsentSelectors ?? []) {
+        const passed = page.absent[selector] === true;
+        assertions.push({ kind: 'absent', passed, expected: `absent selector ${selector}`, observed: passed ? 'absent' : 'present', path: selector });
       }
       for (const selector of check.expectedEnabledSelectors ?? []) {
         const passed = page.enabled[selector] === true;
@@ -547,7 +580,7 @@ async function probeUi(check: Check, options: VerifyOptions, timeoutMs: number, 
         assertions.push({ kind: 'console', passed: page.console.errors.length === 0, expected: 'no console errors or uncaught exceptions', observed: page.console.errors.length ? page.console.errors.join(' | ') : 'none' });
       }
       const failures = assertions.filter(assertion => !assertion.passed);
-      const hints = failures.length ? probeHints(check, page, assertions) : [];
+      const hints = [...(failures.length ? probeHints(check, page, assertions) : []), ...hiddenAbsenceHints(check, page)];
       const policy = check.captureArtifacts ?? options.uiCapture ?? 'on-failure';
       let captured: CheckResult['capture'];
       if (policy === 'always' || (policy === 'on-failure' && failures.length > 0)) {
@@ -874,7 +907,7 @@ function failedSetupPreflightResult(root: string, change: Change, options: Verif
     blockedBy: 'setup',
   }));
   return {
-    changeId: change.id,
+    changeId: options.changeRef ?? change.id,
     runnable: 0,
     outcome: 'failed',
     total: results.length,
@@ -1071,7 +1104,7 @@ async function runChecksOnce(root: string, change: Change, options: VerifyOption
     const execution = kind === 'http'
       ? await probe(check, timeoutMs, outputLimit, recoveryHint(change, check, readiness))
       : kind === 'ui'
-        ? await probeUi(check, options, timeoutMs, outputLimit, recoveryHint(change, check, readiness), root, change.id)
+        ? await probeUi(check, options, timeoutMs, outputLimit, recoveryHint(change, check, readiness), root, options.changeRef ?? change.id)
         : await execute(check.command!, cwd, timeoutMs, outputLimit, commandEnv!.environment);
     const status: CheckStatus = execution.exitCode === 0 && !execution.timedOut ? 'passed' : 'failed';
     const readinessContext = readinessBlocked && kind === 'command'
@@ -1127,7 +1160,7 @@ async function runChecksOnce(root: string, change: Change, options: VerifyOption
         : 'checks';
   const isolated = [...commandIsolation].sort();
   return {
-    changeId: change.id,
+    changeId: options.changeRef ?? change.id,
     runnable,
     outcome,
     total: results.length,
@@ -1357,7 +1390,7 @@ export function summarizeVerification(result: VerifyResult): string {
 
 /** Persist bounded verification output beside the change so close and archive carry it. */
 export async function persistVerificationLog(root: string, result: VerifyResult): Promise<{ logPath: string; logHash: string; logBytes: number }> {
-  const changeDirectory = path.join(path.resolve(root), '.notchlet', 'changes', result.changeId);
+  const changeDirectory = directoryForRelative(root, 'active', result.changeId);
   const directory = path.join(changeDirectory, 'evidence', 'logs');
   const file = path.join(directory, `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}.json`);
   const payload = {

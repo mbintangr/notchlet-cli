@@ -2,10 +2,11 @@
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile, writeFile, access } from 'node:fs/promises';
-import { addCheckToChange, addDesignDecisionToChange, addRequirementToChange, addScenarioToChange, addTaskToChange, appendEvidence, applyChangeUpdate, artifactRole, authorCapabilityDeltaOperation, authorCapabilityDeltaOperations, capabilityContribution, captureCapabilityBaseline, CORE_VERSION, closeChange, completeTasks, coverageEvidenceFrom, coverageReport, deleteCapabilityDeltaOperation, diagnoseArtifactLocations, evaluateEvidenceFreshness, evaluateState, evaluateVerificationFacets, evidenceAssetPath, findWorkspace, importChangePlan, initWorkspace, inspectChangeArtifacts, inspectEvidence, inspectExecutionDrift, inspectPlan, instructions, listArchivedChanges, listChanges, listSchemas, mutateChange, parseChangeOperations, parseChangePlan, persistChangeOperations, persistConversion, presenceOnlyUiChecks, previewCapabilityClose, previewPlanReadiness, projectChangePlan, readArchivedChange, readChange, readEvidence, readSchema, readiness, removeChangeItem, renderChangeArtifacts, resolveEvidenceScope, restoreChange, scaffold, schemaDirectory, seedCapabilityDeltaOperations, setupAdvisory, stageEvidenceAttachments, taskEvidenceStatus, transitionTask, updateChangeItem, verificationRecovery, withMarkdownArtifacts, WorkflowError, writeChangeArtifacts, type ChangeCollection, type ChangeItemKind, type ChangeItemPatch, type EvidenceCapture, type EvidenceWriteInput, type JsonPathAssertion, type TaskStatus, type WorkflowAction, type CliJsonEnvelope } from '@notchlet/core';
+import { addCheckToChange, addDesignDecisionToChange, addRequirementToChange, addScenarioToChange, addTaskToChange, appendEvidence, applyChangeUpdate, artifactRole, assertLeafAuthorable, authorCapabilityDeltaOperation, authorCapabilityDeltaOperations, buildChangeTree, buildNode, capabilityContribution, captureCapabilityBaseline, CORE_VERSION, closeChange, completeTasks, coverageEvidenceFrom, coverageReport, deleteCapabilityDeltaOperation, detectObservationBasis, diagnoseArtifactLocations, evaluateEvidenceFreshness, evaluateState, evaluateVerificationFacets, evidenceAssetPath, findWorkspace, flattenTree, hiddenOnlySoleCheckAdvisory, importChangePlan, importChangeTree, initWorkspace, inspectChangeArtifacts, inspectClosureIntegrity, inspectEvidence, inspectExecutionDrift, inspectPlan, instructions, listArchivedChanges, listChanges, listSchemas, mutateChange, parseChangeOperations, parseChangePlan, parseChangeTreePlan, persistChangeOperations, persistConversion, presenceOnlyUiChecks, previewCapabilityClose, previewPlanReadiness, projectChangePlan, projectChangeTreePlan, readArchivedChange, readBacklogSidecar, readChange, readEvidence, readSchema, readiness, removeChangeItem, renderChangeArtifacts, resolveEvidenceScope, restoreChange, scaffold, scaffoldNode, schemaDirectory, seedCapabilityDeltaOperations, setupAdvisory, stageEvidenceAttachments, summarizeSourceBinding, taskEvidenceStatus, taskLinkAdvisory, transitionTask, treeCounts, nextEligibleLeaf, updateChangeItem, verificationRecovery, withMarkdownArtifacts, WorkflowError, writeChangeArtifacts, type BacklogItemType, type ChangeCollection, type ChangeItemKind, type ChangeItemPatch, type ChangeTree, type ChangeTreeNode, type ClosureIntegrityReport, type EvidenceCapture, type EvidenceWriteInput, type JsonPathAssertion, type ScopedTextExpectation, type TaskStatus, type UiCapturePolicy, type UiStep, type WorkflowAction, type CliJsonEnvelope } from '@notchlet/core';
 import { section, kv, bullet, ok, err, warn, table, box, divider } from './cli-format.js';
 import { isTty, prompt, secret, confirm, requiredString } from './cli-prompt.js';
 import { readAttemptHistory, summarizeHistory } from './history.js';
+import { formatChangeTree, formatSubtree, formatTree } from './tree-format.js';
 
 const args = process.argv.slice(2);
 const profiling = process.env.NOTCHLET_PROFILE === '1';
@@ -26,7 +27,7 @@ async function profileAsync<T>(name: string, operation: () => Promise<T>): Promi
 const json = args.includes('--json');
 // Boolean switches never consume a following token. Every other `--flag` is treated as
 // taking a value, so new commands work without maintaining a flag allowlist.
-const booleanFlags = new Set(['--json', '--help', '-h', '--version', '--local', '--interactive', '--quick', '--preview', '--yes', '--revoke', '--apply', '--allow-file-token-store', '--keep-local', '--force', '--record', '--remote', '--offline', '--stale', '--failed', '--require-evidence', '--dry-run', '--render', '--no-render', '--markdown', '--full-page', '--expect-no-console-errors', '--all', '--all-missing', '--serve', '--keep-running', '--reuse-serve', '--save-setup', '--check-setup-idempotence', '--accept-plan-drift', '--history']);
+const booleanFlags = new Set(['--json', '--help', '-h', '--version', '--local', '--interactive', '--quick', '--preview', '--yes', '--revoke', '--apply', '--allow-file-token-store', '--keep-local', '--force', '--record', '--remote', '--offline', '--stale', '--failed', '--require-evidence', '--dry-run', '--render', '--no-render', '--markdown', '--full-page', '--expect-no-console-errors', '--all', '--all-missing', '--serve', '--keep-running', '--reuse-serve', '--save-setup', '--check-setup-idempotence', '--accept-plan-drift', '--history', '--tree', '--create', '--rebind']);
 const positional: string[] = [];
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
@@ -68,6 +69,40 @@ function jsonPathAssertionsOption(): JsonPathAssertion[] | undefined {
   }
   return assertions;
 }
+function jsonObjectListOption<T>(name: string, guidance: string): T[] | undefined {
+  const raws = rawOptionValues(name);
+  if (!raws.length) return undefined;
+  return raws.map(raw => {
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { fail('invalid_input', `${name} is not valid JSON.`, guidance, 2); }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) fail('invalid_input', `${name} entries must be JSON objects.`, guidance, 2);
+    return parsed as T;
+  });
+}
+function uiStepsOption(): UiStep[] | undefined {
+  return jsonObjectListOption<UiStep>('--step', 'Provide one --step per action, for example --step \'{"action":"click","selector":"#save"}\'.');
+}
+function scopedTextOption(): ScopedTextExpectation[] | undefined {
+  return jsonObjectListOption<ScopedTextExpectation>('--expected-scoped-text', 'Provide one --expected-scoped-text per assertion, for example --expected-scoped-text \'{"selector":"#heading","contains":"Create item"}\'.');
+}
+function capturePolicyOption(): UiCapturePolicy | undefined {
+  const value = optionValue('--capture-artifacts');
+  if (value === undefined) return undefined;
+  if (!['never', 'on-failure', 'always'].includes(value)) fail('invalid_input', '--capture-artifacts must be never, on-failure, or always.', 'Use --capture-artifacts always to archive passing UI captures.', 2);
+  return value as UiCapturePolicy;
+}
+function observationBasisLabel(basis: 'git' | 'artifact' | 'none' | 'mixed'): string {
+  if (basis === 'git') return 'git (source tracked)';
+  if (basis === 'artifact') return 'artifact (non-Git; source binding is recorded per evidence)';
+  return basis;
+}
+function sourceBindingLabel(binding?: ReturnType<typeof summarizeSourceBinding>): string {
+  if (!binding || binding.basis === 'none') return 'none (no current evidence)';
+  const counts = `${binding.gitChecks} git, ${binding.workspaceChecks} workspace fingerprint, ${binding.unboundChecks} unbound`;
+  if (binding.basis === 'git') return `Git (source bound; ${counts})`;
+  if (binding.basis === 'artifact') return binding.bound ? `workspace fingerprint (artifact basis; source bound; ${counts})` : `artifact only (source unbound; ${counts})`;
+  return binding.bound ? `mixed (source bound; ${counts})` : `mixed (source partially unbound; ${counts})`;
+}
 function expectedHeadersOption(): Record<string, string> | undefined {
   const raws = rawOptionValues('--expected-header');
   if (!raws.length) return undefined;
@@ -108,7 +143,7 @@ function parseRevisionOption(name: string): number | undefined {
 const CHANGE_KINDS: ChangeItemKind[] = ['requirement', 'check', 'scenario', 'decision', 'task'];
 const AUTHORED_OPTIONS: Record<ChangeItemKind, string[]> = {
   requirement: ['--title', '--description'],
-  check: ['--description', '--kind', '--command', '--url', '--expected-status', '--expected-body-contains', '--expected-json', '--expected-json-contains', '--expected-json-at', '--expected-header', '--wait-for', '--settle-ms', '--expected-selector', '--expected-text', '--expect-no-console-errors', '--full-page', '--working-directory', '--requirement', '--scenario', '--task'],
+  check: ['--description', '--kind', '--command', '--url', '--expected-status', '--expected-body-contains', '--expected-json', '--expected-json-contains', '--expected-json-at', '--expected-header', '--wait-for', '--settle-ms', '--expected-selector', '--expected-visible-selector', '--expected-hidden-selector', '--expected-absent-selector', '--expected-enabled-selector', '--expected-text', '--expected-title', '--expected-scoped-text', '--step', '--capture-artifacts', '--expect-no-console-errors', '--full-page', '--working-directory', '--requirement', '--scenario', '--task', '--no-prompt'],
   scenario: ['--requirement', '--when', '--then'],
   decision: ['--decision', '--rationale'],
   task: ['--title', '--requirement', '--depends-on'],
@@ -139,6 +174,7 @@ function itemPatchFromOptions(kind: ChangeItemKind): ChangeItemPatch {
     single('--expected-body-contains', 'expectedBodyContains');
     single('--wait-for', 'waitFor');
     single('--expected-text', 'expectedText');
+    single('--expected-title', 'expectedTitle');
     single('--working-directory', 'workingDirectory');
     const settleMs = optionValue('--settle-ms');
     if (settleMs !== undefined) {
@@ -148,6 +184,20 @@ function itemPatchFromOptions(kind: ChangeItemKind): ChangeItemPatch {
     }
     const expectedSelectors = rawOptionValues('--expected-selector');
     if (expectedSelectors.length) patch.expectedSelectors = expectedSelectors;
+    const expectedVisibleSelectors = rawOptionValues('--expected-visible-selector');
+    if (expectedVisibleSelectors.length) patch.expectedVisibleSelectors = expectedVisibleSelectors;
+    const expectedHiddenSelectors = rawOptionValues('--expected-hidden-selector');
+    if (expectedHiddenSelectors.length) patch.expectedHiddenSelectors = expectedHiddenSelectors;
+    const expectedAbsentSelectors = rawOptionValues('--expected-absent-selector');
+    if (expectedAbsentSelectors.length) patch.expectedAbsentSelectors = expectedAbsentSelectors;
+    const expectedEnabledSelectors = rawOptionValues('--expected-enabled-selector');
+    if (expectedEnabledSelectors.length) patch.expectedEnabledSelectors = expectedEnabledSelectors;
+    const expectedScopedText = scopedTextOption();
+    if (expectedScopedText !== undefined) patch.expectedScopedText = expectedScopedText;
+    const steps = uiStepsOption();
+    if (steps !== undefined) patch.steps = steps;
+    const captureArtifacts = capturePolicyOption();
+    if (captureArtifacts !== undefined) patch.captureArtifacts = captureArtifacts;
     if (args.includes('--expect-no-console-errors')) patch.expectedNoConsoleErrors = true;
     if (args.includes('--full-page')) patch.fullPage = true;
     const expectedStatus = optionValue('--expected-status');
@@ -200,19 +250,74 @@ async function pickNamedValue<T>(input: string | undefined, items: T[], options:
   }
 }
 interface ChangeTarget { id: string; archived: boolean }
+/** Core releases before nested changes omit relativePath; keep the CLI forward- and backward-compatible. */
+type ChangeListItem = Awaited<ReturnType<typeof listChanges>>[number] & { relativePath?: string };
 async function resolveChangeTarget(root: string, input: string): Promise<ChangeTarget> {
-  const active = (await listChanges(root)).map(change => ({ ...change, archived: false }));
-  const archived = await listArchivedChanges(root);
+  const active: Array<ChangeListItem & { archived: false }> = (await listChanges(root)).map(change => ({ ...change, archived: false as const }));
+  const archived = (await listArchivedChanges(root)) as Array<ChangeListItem & { archived: true }>;
   const selected = await pickNamedValue(input, [...active, ...archived], {
-    kind: 'Change', promptText: 'Select change', label: item => `${item.name} (${item.id})${item.archived ? ' [archived]' : ''}`, keys: item => [item.id, item.name],
+    kind: 'Change', promptText: 'Select change', label: item => `${item.name} (${item.relativePath ?? item.id})${item.archived ? ' [archived]' : ''}`, keys: item => [item.relativePath ?? item.id, item.id, item.name],
   });
   if (!selected) throw new Error(`No change matched "${input}". Use a change name or ID from \`notchlet change list\`${archived.length ? ' or `notchlet change list --archived`' : ''}.`);
-  return { id: selected.id, archived: selected.archived };
+  return { id: selected.relativePath ?? selected.id, archived: selected.archived };
 }
 async function resolveChangeRef(root: string, input: string): Promise<string> {
   const target = await resolveChangeTarget(root, input);
   if (target.archived) throw new WorkflowError('archived_change', `Change ${target.id} is archived.`, `Restore it with \`notchlet change restore ${target.id}\` before editing.`);
   return target.id;
+}
+function treeNodeJson(node: ChangeTreeNode): Record<string, unknown> {
+  return {
+    relativePath: node.relativePath,
+    id: node.id,
+    name: node.name,
+    scope: node.scope,
+    status: node.closed ? 'done' : node.status,
+    closed: node.closed,
+    backlog: node.backlog ? { itemType: node.backlog.node.itemType, title: node.backlog.node.title, key: node.backlog.platform.key ?? null, itemId: node.backlog.platform.itemId ?? null, sync: node.backlog.sync.state } : null,
+    children: node.children.map(treeNodeJson),
+  };
+}
+function treeJson(tree: ChangeTree): Record<string, unknown> {
+  return { counts: tree.counts, warnings: tree.warnings, roots: tree.roots.map(treeNodeJson) };
+}
+function integrityBlockers(report: ClosureIntegrityReport | undefined): Array<{ code: string; message: string; recovery: string }> {
+  return (report?.issues ?? []).map(issue => ({ code: issue.code, message: issue.message, recovery: issue.recovery }));
+}
+async function closureIntegrityWarnings(root: string, nodes: ChangeTreeNode[]): Promise<Array<{ code: string; message: string; recovery: string }>> {
+  const warnings: Array<{ code: string; message: string; recovery: string }> = [];
+  for (const node of nodes) {
+    if (!node.closed) continue;
+    try {
+      const report = await inspectClosureIntegrity(root, node.relativePath);
+      for (const issue of report.issues) warnings.push({ code: issue.code, message: issue.message, recovery: issue.recovery });
+    } catch (error) {
+      const known = error instanceof WorkflowError ? error : undefined;
+      warnings.push({
+        code: known?.code ?? 'closure_integrity_unreadable',
+        message: known?.message ?? `Could not inspect closure integrity for ${node.relativePath}: ${error instanceof Error ? error.message : String(error)}`,
+        recovery: known?.recovery ?? 'Inspect the archived closure files and retry.',
+      });
+    }
+  }
+  return warnings;
+}
+function closureIntegrityLines(report: ClosureIntegrityReport): string[] {
+  const lines: string[] = [];
+  lines.push(section(`Closure integrity: ${report.relativePath}`));
+  lines.push(kv('Archived', report.archived ? ok('yes') : 'no'));
+  lines.push(kv('Manifest', report.manifestPresent ? report.manifestPath : '(missing)'));
+  lines.push(kv('Authoritative', report.authoritative ? 'yes' : 'no (active changes are re-closed from current state)'));
+  lines.push(kv('Checked children', String(report.checkedChildren)));
+  lines.push(kv('Valid', report.authoritative ? (report.valid ? ok('yes') : err(`no (${report.issues.length} issue(s))`)) : 'not applicable (active change)'));
+  for (const issue of report.issues) {
+    lines.push(bullet(`${issue.code}: ${issue.message}`));
+    lines.push(bullet(issue.recovery, '↳'));
+  }
+  return lines;
+}
+async function assertLeafTarget(root: string, id: string, operation: string): Promise<void> {
+  assertLeafAuthorable(await buildNode(root, id), operation);
 }
 function changeItemHelp(action: 'add' | 'update', kind: ChangeItemKind): string {
   const usageLine = action === 'add'
@@ -220,14 +325,14 @@ function changeItemHelp(action: 'add' | 'update', kind: ChangeItemKind): string 
     : `notchlet change update <change> ${kind} <item-id> [fields] [--revision <n>]`;
   const fields: Record<ChangeItemKind, string> = {
     requirement: '--title <text> --description <text>',
-    check: '--description <text> [--kind command|http|browser|ui|manual] [--command <cmd>] [--url <http(s) URL>] [--expected-status <n>] [--expected-body-contains <text>] [--expected-json <json>] [--expected-json-contains <json>] [--expected-json-at <json>] [--expected-header "Name: value"] [--wait-for <selector>] [--settle-ms <n>] [--expected-selector <selector>] [--expected-text <text>] [--expect-no-console-errors] [--full-page] [--working-directory <dir>] [--requirement <id[,id]>] [--scenario <id[,id]>] [--task <id[,id]>]',
+    check: '--description <text> [--kind command|http|browser|ui|manual] [--command <cmd>] [--url <http(s) URL>] [--expected-status <n>] [--expected-body-contains <text>] [--expected-json <json>] [--expected-json-contains <json>] [--expected-json-at <json>] [--expected-header "Name: value"] [--wait-for <selector>] [--settle-ms <n>] [--expected-selector <selector>] [--expected-visible-selector <selector>] [--expected-hidden-selector <selector>] [--expected-absent-selector <selector>] [--expected-enabled-selector <selector>] [--expected-text <text>] [--expected-title <text>] [--expected-scoped-text <json>] [--step <json>] [--capture-artifacts never|on-failure|always] [--expect-no-console-errors] [--full-page] [--working-directory <dir>] [--requirement <id[,id]>] [--scenario <id[,id]>] [--task <id[,id]>]',
     scenario: '--requirement <id> --when <text> --then <text>',
     decision: '--decision <text> --rationale <text>',
     task: '--title <text> [--requirement <id[,id]>] [--depends-on <id[,id]>]',
   };
   const examples: Record<ChangeItemKind, string> = {
     requirement: 'notchlet change add my-change requirement --id REQ-1 --title "Upload limits" --description "Uploads reject unsupported formats."',
-    check: 'notchlet change add my-change check --id CHECK-1 --description "Run tests" --command "npm test" --requirement REQ-1 --task TASK-1',
+    check: 'notchlet change add my-change check --id CHECK-1 --description "Run tests" --command "npm test" --requirement REQ-1 --task TASK-1\n  notchlet change add my-change check --id CHECK-2 --description "Receipt opens" --kind ui --url http://127.0.0.1:3000/ --wait-for "#app" --expected-visible-selector "#receipt" --expected-hidden-selector "#error" --step \'{"action":"click","selector":"#complete"}\'',
     scenario: 'notchlet change add my-change scenario --id SCN-1 --requirement REQ-1 --when "a user uploads a PDF" --then "the request is rejected"',
     decision: 'notchlet change add my-change decision --id DEC-1 --decision "Validate at the API boundary" --rationale "One enforcement point"',
     task: 'notchlet change add my-change task --id TASK-1 --title "Implement upload validation" --requirement REQ-1',
@@ -261,24 +366,25 @@ This project uses Notchlet for change planning, implementation evidence, and loc
 
 ## Start here
 
-1. Run \`notchlet status --json\` to find the active change and its blockers.
+1. Run \`notchlet status --json\` (add \`--tree\` for the backlog hierarchy) to find the active work and its blockers.
 2. Read the change with \`notchlet change show <change>\` and follow \`notchlet instructions <change> --action implement\`.
 3. Use the CLI (or local MCP tools) for authored metadata. Do not hand-edit \`tasks.json\`.
 
 ## Workflow
 
-- Author requirements, scenarios, decisions, checks, and tasks before implementation.
-- Import a structured plan with \`notchlet change new <name> --from plan.json --dry-run\`. Plan import renders canonical artifacts by default; pass \`--no-render\` to keep only plan-provided contents. Plans resolve from the working directory, \`.notchlet/plans/\`, or \`.notchlet/\`; the dry run lists every declared artifact with its role and full path.
+- Backlog-shaped work nests full changes as \`.notchlet/changes/<epic>/<story>/<task>/\`. Scaffold nodes with \`change new <name> --as epic|story|task|subtask --parent <ref>\`; inspect them with \`change tree\` or \`status --tree\`.
+- Author leaf work — requirements, scenarios, decisions, checks, and tasks — on leaves before implementation. A parent is a rollup: task authoring and \`task start|complete\` fail with \`rollup_node\`, its acceptance is its closed children so it needs no leaf planning content and may declare only optional rollup acceptance checks, and it closes only after its children.
+- Import a structured plan with \`notchlet change new <name> --from plan.json --dry-run\`, or a whole backlog tree from \`{"schemaVersion":1,"tree":{...}}\` with \`notchlet change new --from tree.json --dry-run\`. Plans render canonical artifacts by default; pass \`--no-render\` to keep only plan-provided contents. Tree import validates every node and path before writing, rolls back on failure, and reruns reuse nodes at the same path with the same type and title instead of duplicating them. Plans resolve from the working directory, \`.notchlet/plans/\`, or \`.notchlet/\`; the dry run lists every declared artifact with its role and full path.
 - Plans may set \`capabilitySeed: true\` to author delta operations for every requirement, or declare explicit \`capabilityDelta\` operations.
 - Record run and preview metadata with \`change update --run-command\`, \`--preview-url\`, \`--readiness-url\`, and optional \`--ready-timeout\`/\`--ready-interval\`; \`notchlet verify --serve\` starts the app, waits for readiness, and stops it after checks unless \`--keep-running\` is set.
 - Reproduce runs with \`change update --environment KEY=value\`, \`--setup <cmd>\`, and \`--teardown <cmd>\`; these values are stored in change content and the evidence environment descriptor.
 - Choose an evidence policy with \`change update --evidence-policy per-task|end-of-change\`. End-of-change suppresses per-task warnings but still requires current checks at closure.
-- Link checks to requirements with \`--requirement\` and to scenarios with \`--scenario\`, then use \`change update --coverage-policy strict\` when every requirement and scenario must be covered by a check.
+- Link checks to requirements with \`--requirement\`, to scenarios with \`--scenario\`, and to tasks with \`--task\` in the same add/update pass: author tasks first, then checks. When a check is added in a terminal without \`--task\`, Notchlet prompts for a link; pass \`--no-prompt\` to skip. Verify warns when checks have no task link because unlinked evidence may not satisfy task completion. Use \`change update --coverage-policy strict\` when every requirement and scenario must be covered by a check.
 - Start dependency-eligible tasks with \`notchlet task start <task> --change <change>\`.
-- Run command checks, HTTP checks, and rendered UI checks with \`notchlet verify <change> --record\`. HTTP checks may assert \`expectedStatus\`, \`expectedBodyContains\`, \`expectedJson\`, \`expectedJsonContains\`, \`expectedJsonAt\`, and \`expectedHeaders\`. UI checks wait for \`--wait-for\`, settle for \`--settle-ms\`, and assert \`--expected-selector\`, \`--expected-text\`, and \`--expect-no-console-errors\`; capture screenshots and DOM with \`--capture-url <url>\` and \`--full-page\`, or attach files with \`--attach <path>\`. Manual checks require recorded evidence.
+- Run command checks, HTTP checks, and rendered UI checks with \`notchlet verify <change> --record\`. HTTP checks may assert \`expectedStatus\`, \`expectedBodyContains\`, \`expectedJson\`, \`expectedJsonContains\`, \`expectedJsonAt\`, and \`expectedHeaders\`. UI checks wait for \`--wait-for\`, settle for \`--settle-ms\`, and assert \`--expected-selector\`, \`--expected-visible-selector\`, \`--expected-hidden-selector\`, \`--expected-absent-selector\`, \`--expected-enabled-selector\`, \`--expected-text\`, and \`--expect-no-console-errors\`; visibility assertions are required to prove dialogs, overlays, and hidden panels are in the intended state, and a sole hidden-only check is flagged because a blank page would pass. Capture screenshots and DOM with \`--capture-url <url>\` and \`--full-page\`, or attach files with \`--attach <path>\`. Manual checks require recorded evidence.
 - Use \`change update <change> check <check-id> --working-directory <dir>\` for nested apps; \`notchlet change path <change> [artifact]\` prints resolved paths.
 - Complete tasks with \`notchlet task complete <task> --change <change> --require-evidence\`, or \`task complete --all\` in dependency order.
-- Before closing, run \`notchlet change render <change> --write\` when artifacts drifted, then \`notchlet change close <change> --preview\`. Add \`--markdown\` only when human-readable views are wanted; JSON is canonical.
+- Before closing, run \`notchlet change render <change> --write\` when artifacts drifted, then \`notchlet change close <change> --preview\`. Rollup previews warn when intent and outcome are both blank; closure stores the authored intent and outcome as \`narrative\`, and closed rollups record descendant node/leaf/check/evidence/task totals. Add \`--markdown\` only when human-readable views are wanted; JSON is canonical.
 
 ## Rules
 
@@ -299,7 +405,7 @@ Work inside this repository using the Notchlet workflow.
 5. Preview closure with \`notchlet change close <change> --preview\` before archiving. If status and close preview disagree, resolve the listed closure blockers.
 6. Ask before any push, publish, deploy, or destructive repository operation.
 
-If the workspace is empty, start with \`notchlet change new <name> --from plan.json --dry-run\` to preview a declarative plan and its post-import setup steps. Keep reusable plans under \`.notchlet/plans/\`.
+If the workspace is empty, start with \`notchlet change new <name> --from plan.json --dry-run\` to preview a declarative plan and its post-import setup steps, or \`notchlet change new --from tree.json --dry-run\` to preview a whole backlog tree. Keep reusable plans under \`.notchlet/plans/\`. Author requirements and tasks before checks, and link each check with \`--requirement\`, \`--scenario\`, and \`--task\` in one pass; verify warns when a check has no task link.
 `;
   const readme = `# .notchlet workspace
 
@@ -308,6 +414,9 @@ Notchlet stores local change metadata and evidence here.
 - \`workspace.json\` - workspace metadata.
 - \`plans/\` - optional reusable change plans referenced by \`change new --from\`.
 - \`changes/<id>/tasks.json\` - versioned change model (state). Author it through the CLI, not by hand.
+- \`changes/<epic>/<story>/<task>/\` - backlog-shaped nodes; every node is a full change. A directory without \`tasks.json\` is an implicit container.
+- \`changes/<node>/backlog.json\` - backlog sidecar with item type, title, platform linkage, and sync state. Children are derived from the filesystem; they are never stored in the sidecar or in \`tasks.json\`.
+- Author tasks only on leaves. Parents are rollups: acceptance comes from closed children, optional rollup acceptance checks are allowed, and close children bottom-up before the parent.
 - \`revision\` advances on every write; \`contentRevision\` advances only when authored content changes. Evidence freshness binds to the v2 fingerprint of authored content and non-derived artifacts, not to task progress.
 - \`evidencePolicy\` is \`per-task\` (default) or \`end-of-change\`; closure still requires current checks.
 - Checks may be \`command\`, \`http\` (URL + optional status/body/JSON/header assertions), \`browser\` (legacy HTTP alias), \`ui\` (rendered DOM, text, console, and captures), or \`manual\` (record evidence separately).
@@ -319,13 +428,16 @@ Notchlet stores local change metadata and evidence here.
 - \`changes/<id>/evidence.jsonl\` - append-only evidence records with freshness bindings.
 - \`changes/<id>/evidence/logs/\` - bounded verification output logs.
 - \`changes/<id>/evidence/<evidence-id>/\` - attached screenshots, DOM, text, or JSON evidence.
-- \`archive/<id>/\` - closed changes, including \`closure.json\`, all evidence assets, and optional \`closure.md\` when close requested it.
+- \`archive/<relative-path>/\` - closed changes mirrored at their hierarchy path, including \`closure.json\`, all evidence assets, and optional \`closure.md\` when close requested it.
 - \`.local/close/\` - transient close journal; removed after a successful close.
 
 Useful commands:
 
 \`\`\`text
 notchlet change list --json
+notchlet change tree
+notchlet change new <name> --as epic
+notchlet status <change> --tree
 notchlet change show <change>
 notchlet change path <change> [artifact]
 notchlet instructions <change> --action implement
@@ -369,18 +481,24 @@ ${section('Auth')}
 
 ${section('Workspace')}
   workspace bind --server <url> [--product <name>] [--repository <name>] [--rebind]   Bind checkout to a product/repository
+  workspace bind --create --name <product> [--org <name>] [--team <name>] [--dry-run]   Create or adopt a product and connect the Git remote
   workspace info                                                        Show workspace binding and config
   doctor                                                                Diagnose workspace, binding, and server connectivity
 
 ${section('Sync')}
   sync mode auto|manual                                     Set automatic sync preference
   sync status|push|pull|resolve --change <name|id> [--yes] [--keep-local]   Sync a change with the remote
+  sync status|push|pull --change <name|id> --tree          Sync a backlog subtree, ancestors first on push
+  sync deliver --change <name|id> --status DONE [--with-children]   Deliver a synchronized change deliberately
 
 ${section('Changes')}
-  change new <name> [--quick] [--from <plan.json> [--dry-run] [--no-render] [--markdown]]   Create a change or import a declarative plan
+  change new <name> [--quick] [--as epic|story|task|subtask --parent <ref>]   Create a change or backlog node
+  change new [<name>] --from <plan.json|tree.json> [--dry-run] [--no-render] [--markdown]   Import a single change plan or a whole backlog tree
+  change new <name> --as epic|story|task|subtask [--parent <ref>] [--title <text>] [--slug <slug>]   Scaffold a backlog node
+  change tree [<name|id|path>] [--depth <n>]                Show the backlog tree or one node's subtree
   change list [--archived]                                  List active or archived changes
   change show <name|id>                                     Show change details and readiness
-  status [<name|id> | --change <name|id>]                   Show workspace or change planning, execution, verification, and closure state
+  status [<name|id> | --change <name|id>] [--tree]          Show workspace or change state; --tree adds hierarchy and counts
   validate <name|id>                                        Validate planning readiness and list blockers
   change restore <name|id>                                  Restore an archived change to active work
   change path <name|id> [artifact]                          Print the resolved change or artifact path
@@ -391,9 +509,9 @@ ${section('Changes')}
   change remove <name|id> requirement|check|scenario|decision|task <item-id>   Remove authored content
   change convert <name|id> --schema quick|standard [--revision <n>]   Convert a change schema
   change apply <name|id> --file <path> [--revision <n>]     Apply an ordered authoring batch atomically
-  change render <name|id> [--check|--write] [--force] [--markdown]       Render canonical and optional Markdown artifacts
+  change render <name|id> [--check|--write] [--force] [--markdown] [--tree]  Render canonical and optional Markdown artifacts
   change plan status <name|id> | validate <path> | sync <name|id>        Inspect, validate, or accept plan provenance
-  change close <name|id> --preview | --baseline-revision <n> [--yes] [--markdown] [--accept-plan-drift]   Close and archive a change
+  change close <name|id> --preview [--fail-on-blockers] | --baseline-revision <n> [--yes] [--markdown] [--accept-plan-drift] [--accept-artifact-basis]   Close and archive a change
 
 ${section('Tasks')}
   task start <task-name|id> --change <name|id> --revision <n>  Start a task (--revision optional; defaults to current)
@@ -405,12 +523,17 @@ ${section('Tasks')}
 
 ${section('Verification')}
   verify <name|id> [--check <id,...>] [--record] [--requirement <id,...>] [--scenario <id,...>] [--task <id,...>]   Run declared checks and optionally record scoped evidence
+  verify <name|id> --tree [--record] [--serve]        Verify every open node deepest-first, then by path, and aggregate results
   verify <name|id> --serve [--keep-running] [--environment KEY=value] [--setup <cmd>] [--save-setup] [--teardown <cmd>] [--repeat <n>] [--check-setup-idempotence --setup-state <path>...]   Own the app lifecycle around checks and detect state-dependent failures
   verify <name|id> --record --capture-url <url> [--browser <path>] [--viewport <w>x<h>] [--wait-for <selector>] [--settle-ms <n>] [--full-page]   Capture one settled screenshot and DOM
+  closure verify <name|id> [--tree]                        Verify archived closure manifests and parent-child closure hashes
   schema [name] [--dir]                                     List or print shipped JSON schemas
 
 ${section('Other')}
   backlog import <item-key|title|id> [--product-id <id>]     Import a backlog item as a change
+  backlog import <item-key|title|id> --tree [--no-children] [--no-ancestors]   Import its platform subtree as nested changes
+  backlog set <ref> [--title] [--description] [--priority] [--points] [--start] [--due]   Author local planning fields
+  migrate [--dry-run|--apply] [--rename] [--legacy-dir <name>]   Re-home flat legacy changes under legacy/ or linked trees
   checkpoint --change <name|id> --name <name> [--summary <text>] [--backlog-status TODO|IN_PROGRESS|IN_REVIEW|DONE]   Create a remote checkpoint
   link --change <name|id> [--backlog-item <id>] [--repository <id>]   Link a synchronized change to a backlog item or repository
   evidence record --change <name|id> [--file <json-path>] [--summary <text>] [--kind <kind>] [--outcome <state>] [--capture-url <url>]   Record evidence
@@ -513,7 +636,7 @@ function parseEvidenceWriteInput(value: unknown): EvidenceWriteInput {
 
 async function artifactContents(root: string, id: string, change: Awaited<ReturnType<typeof readChange>>, options: { archived?: boolean } = {}): Promise<Record<string, string>> {
   const result: Record<string, string> = {};
-  const directory = path.join(root, '.notchlet', options.archived ? 'archive' : 'changes', id);
+  const directory = path.join(root, '.notchlet', options.archived ? 'archive' : 'changes', ...id.split('/'));
   for (const relative of Object.values(change.artifacts)) {
     try { result[relative] = await readFile(path.join(directory, relative), 'utf8'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -522,7 +645,7 @@ async function artifactContents(root: string, id: string, change: Awaited<Return
 }
 
 async function readArchivedClosure(root: string, id: string): Promise<Record<string, unknown> | undefined> {
-  try { return JSON.parse(await readFile(path.join(root, '.notchlet', 'archive', id, 'closure.json'), 'utf8')) as Record<string, unknown>; }
+  try { return JSON.parse(await readFile(path.join(root, '.notchlet', 'archive', ...id.split('/'), 'closure.json'), 'utf8')) as Record<string, unknown>; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
 }
 
@@ -648,16 +771,31 @@ Options:
     }
     else if (command === 'workspace' && ['bind', 'rebind'].includes(positional[1] ?? '')) {
       if (args.includes('--help') || args.includes('-h')) {
-        showCommandHelp('workspace bind', `notchlet workspace bind --server <url> [--product <name|id>] [--repository <name|owner/repo|id>] [--rebind]
+        showCommandHelp('workspace bind', `notchlet workspace bind [--create --name <product>] [--server <url>] [--product <name|id>] [--repository <name|owner/repo|id>] [--rebind]
 
   Bind a Git checkout to a Notchlet product and repository.
+  With --create, create the product on the platform (or adopt an identical one),
+  connect this checkout's Git remote, and bind the workspace.
 
-Options:
+Adopt mode options:
   --server <url>             Notchlet server (default: ${DEFAULT_SERVER})
   --product <name|id>        Product name or ID (defaults to an interactive picker)
   --repository <name|owner/repo|id>  Repository name or ID (defaults to an interactive picker)
   --product-id <id>          Product ID (numeric, retained for scripts)
   --repository-id <id>       Repository ID (numeric, retained for scripts)
+
+Create mode options (--create):
+  --name <product>           Product name (prompted only on an interactive terminal)
+  --org <name|id>            Organization (defaults to the only accessible one)
+  --team <name|id>           Team that owns the product (defaults to the only accessible one)
+  --slug <slug>              Product slug (defaults to a slugified name; the create idempotency key)
+  --description <text>       Product description
+  --remote <name>            Git remote to connect (defaults to origin, else the only remote)
+  --provider GITHUB|GITLAB   Provider for hosts other than github.com/gitlab.com
+  --repo-label <text>        Repository label shown on the platform
+  --dry-run                  Resolve and print the plan without writing anything
+
+Shared options:
   --rebind                   Confirm rebinding if the workspace is already bound
   --endpoint <url>           Override MCP endpoint
   --allow-file-token-store   Allow restricted file credential storage
@@ -667,6 +805,46 @@ Options:
       const server = await requiredString(serverOption(), `Notchlet server HTTPS origin [${DEFAULT_SERVER}]: `) ?? DEFAULT_SERVER;
       const productQuery = optionValue('--product') ?? optionValue('--product-id');
       const repositoryQuery = optionValue('--repository') ?? optionValue('--repository-id');
+      if (args.includes('--create')) {
+        if (productQuery !== undefined) fail('usage_error', '--create cannot be combined with --product or --product-id.', 'Pass --name to create a product, or omit --create to bind an existing one.', 64);
+        if (repositoryQuery !== undefined) fail('usage_error', '--create cannot be combined with --repository or --repository-id.', 'The checkout Git remote is connected automatically; omit the repository options.', 64);
+        const name = await requiredString(optionValue('--name'), 'Product name: ');
+        if (!name) fail('usage_error', 'workspace bind --create requires --name in non-interactive mode.', 'Pass --name "<product name>" together with --create.', 64);
+        const provider = optionValue('--provider');
+        if (provider !== undefined && provider !== 'GITHUB' && provider !== 'GITLAB') fail('usage_error', '--provider must be GITHUB or GITLAB.', 'Pass --provider GITHUB or --provider GITLAB.', 64);
+        const { bootstrapWorkspace } = await import('./bootstrap.js');
+        const result = await bootstrapWorkspace(root, {
+          server,
+          name,
+          organization: optionValue('--org'),
+          team: optionValue('--team'),
+          slug: optionValue('--slug'),
+          description: optionValue('--description'),
+          remote: optionValue('--remote'),
+          provider: provider as 'GITHUB' | 'GITLAB' | undefined,
+          repoLabel: optionValue('--repo-label'),
+          dryRun: args.includes('--dry-run'),
+          rebind: positional[1] === 'rebind' || args.includes('--rebind'),
+          endpoint: optionValue('--endpoint'),
+          allowFileStore: args.includes('--allow-file-token-store'),
+        });
+        if (json) { print(result); }
+        else {
+          const plan = result.plan;
+          const lines = [
+            section(result.dryRun ? 'Workspace bootstrap plan (dry run)' : 'Workspace bootstrapped'),
+            kv('Organization', `${plan.organization.name} (#${plan.organization.id})`),
+            kv('Team', `${plan.team.name} (#${plan.team.id})`),
+            kv('Product', `${plan.product.name} · ${plan.product.slug}${plan.product.id === undefined ? '' : ` (#${plan.product.id})`} · ${plan.product.action}`),
+            kv('Repository', `${plan.repository.owner}/${plan.repository.name} · ${plan.repository.provider} · ${plan.repository.action}${plan.repository.id === undefined ? '' : ` (#${plan.repository.id})`}`),
+            kv('Git remote', plan.repository.remote),
+            kv('Repository URL', plan.repository.repoUrl),
+          ];
+          if (result.dryRun) lines.push(kv('Writes', 'none (--dry-run)'));
+          else lines.push(kv('Sync mode', 'manual (run `notchlet sync mode auto` to enable automatic sync)'));
+          console.log(box(lines));
+        }
+      } else {
       let product: any;
       let repository: any;
       if (/^\d+$/.test(productQuery ?? '') && /^\d+$/.test(repositoryQuery ?? '')) {
@@ -712,6 +890,7 @@ Options:
           kv('Sync mode', 'manual (run `notchlet sync mode auto` to enable automatic sync)'),
         ]));
       }
+      }
     }
     else if (command === 'workspace' && positional[1] === 'info') {
       if (args.includes('--help') || args.includes('-h')) {
@@ -743,6 +922,10 @@ Options:
           lines.push(section('Binding'));
           lines.push(kv('Server', b.server));
           lines.push(kv('Server identity', b.serverIdentity));
+          if (b.context?.organizationName) lines.push(kv('Organization', b.context.organizationName));
+          if (b.context?.teamName) lines.push(kv('Team', b.context.teamName));
+          if (b.context?.productName) lines.push(kv('Product', b.context.productName));
+          if (b.context?.productSlug) lines.push(kv('Product slug', b.context.productSlug));
           lines.push(kv('Product ID', String(b.productId)));
           lines.push(kv('Repository ID', String(b.repositoryId)));
           lines.push(kv('Repository remote', b.repositoryRemote));
@@ -785,6 +968,10 @@ Options:
         lines.push(kv('Diagnostic', result.diagnostic));
         lines.push(kv('Git', result.git.isRepository ? ok(result.git.repository.topLevel) : err(result.git.reason ?? 'not a repository')));
         lines.push(kv('Binding', result.binding ? ok('configured') : err('none')));
+        const boundContext = (result.binding as any)?.context;
+        if (boundContext?.productName) lines.push(kv('Product', boundContext.productName));
+        if (boundContext?.teamName) lines.push(kv('Team', boundContext.teamName));
+        if (boundContext?.organizationName) lines.push(kv('Organization', boundContext.organizationName));
         if (result.capabilities) lines.push(kv('Server version', result.capabilities.server?.version ?? '(unknown)'));
         if (result.authScopes?.length) lines.push(kv('Auth scopes', result.authScopes.join(', ')));
         console.log(box(lines));
@@ -820,9 +1007,15 @@ Options:
   push     Push local change to remote
   pull     Pull remote change to local
   resolve  Resolve a conflict (requires --keep-local)
+  deliver  Deliver a synchronized change to its backlog item (requires --status DONE)
 
 Options:
-  --change <name|id>   Change name or ID (required)
+  --change <name|id>   Change name, ID, or relative path (required)
+  --tree               Apply the action to the selected node's subtree, ancestors first on push
+  --with-children      Apply delivery bottom-up to the subtree (deliver)
+  --status <status>    Delivery target status; only DONE is supported
+  --summary <text>     Delivery summary recorded with the platform operation
+  --import-new         Report remote-only children on pull (import them deliberately with backlog import --tree)
   --yes                Skip confirmation prompt
   --keep-local         Keep local changes when resolving (required for resolve)
   --server <url>       Notchlet server (default: ${DEFAULT_SERVER})
@@ -830,13 +1023,32 @@ Options:
   --workspace <root>   Set workspace root
   --json               Machine-readable JSON output`);
       }
+      assertOptions(['--change', '--tree', '--with-children', '--status', '--summary', '--import-new', '--yes', '--keep-local', '--dry-run', '--server', '--endpoint'], 'sync');
       const root = await requireWorkspace('sync');
       const action = positional[1];
-      let id = optionValue('--change') ?? (isTty() ? await prompt('Change name or ID: ') : undefined);
-      if (!['status', 'push', 'pull', 'resolve'].includes(action ?? '') || !id) fail('usage_error', usage, 'Use `notchlet sync <status|push|pull|resolve> --change <name|id> [--yes] [--keep-local]`.', 64);
-      id = await resolveChangeRef(root, id);
-      const { syncStatus, syncPush, syncPull, syncResolve } = await import('./integration.js');
+      let id = optionValue('--change') ?? positional[2] ?? (isTty() ? await prompt('Change name or ID: ') : undefined);
+      if (!['status', 'push', 'pull', 'resolve', 'deliver'].includes(action ?? '') || !id) fail('usage_error', usage, 'Use `notchlet sync <status|push|pull|resolve|deliver> --change <name|id> [--tree] [--yes] [--keep-local]`.', 64);
       const syncOptions = { server: optionValue('--server'), endpoint: optionValue('--endpoint'), yes: args.includes('--yes') };
+      if (args.includes('--tree') && action !== 'resolve' && action !== 'deliver') {
+        const { syncTree } = await import('./backlog-sync.js');
+        const result = await syncTree(root, id, action as 'status' | 'push' | 'pull', { ...syncOptions, importNew: args.includes('--import-new'), dryRun: args.includes('--dry-run') });
+        if (json) { print(result); }
+        else {
+          const lines: string[] = [];
+          lines.push(section(`Sync ${action} tree: ${id}`));
+          lines.push(kv('Nodes', String(result.nodes.length)));
+          if (action === 'push' && !args.includes('--yes')) lines.push(kv('Mode', 'preview (repeat with --yes to write)'));
+          for (const node of result.nodes) lines.push(bullet(`${node.relativePath}${node.itemId === undefined ? '' : ` (#${node.itemId})`} [${node.state}]${node.error ? ` ${node.error}` : ''}${node.conflict ? ` ${node.conflict}` : ''}`));
+          for (const node of result.nodes) for (const warning of node.warnings ?? []) lines.push(bullet(warn(`${node.relativePath}: ${warning}`)));
+          for (const entry of result.remoteOnly) lines.push(bullet(warn(`Remote-only children under item ${entry.parentItemId}: ${entry.itemIds.join(', ')}`)));
+          for (const entry of result.imported ?? []) lines.push(bullet(`${entry.dryRun ? 'Would import' : 'Imported'} item ${entry.itemId} under ${entry.parentItemId} (${entry.nodes} node(s)${entry.truncated ? ', truncated' : ''})`));
+          if (result.stopped) lines.push(bullet(warn('Stopped at a conflict or error; review the node above and retry.')));
+          console.log(box(lines));
+        }
+        return;
+      }
+      id = await resolveChangeRef(root, id);
+      const { syncStatus, syncPush, syncPull, syncResolve, syncDeliver } = await import('./integration.js');
       if (action === 'status') {
         const automaticSync = await syncIfAutomatic(root, id);
         const result = await syncStatus(root, id, syncOptions);
@@ -853,9 +1065,36 @@ Options:
           if (automaticSync) lines.push(kv('Automatic sync', (automaticSync as any).state ?? 'pending'));
           console.log(box(lines));
         }
+      } else if (action === 'deliver') {
+        const status = optionValue('--status') ?? 'DONE';
+        if (status !== 'DONE') fail('usage_error', 'Only --status DONE is supported for delivery.', 'Intermediate statuses stay local; deliver DONE only when review and evidence are complete.', 64);
+        if (!args.includes('--yes') && isTty()) {
+          const confirmed = await confirm(`Deliver ${id}${args.includes('--with-children') ? ' and its subtree' : ''} to the platform as DONE?`);
+          if (!confirmed) { console.log(warn('Cancelled.')); return; }
+        }
+        const result = args.includes('--with-children')
+          ? await (await import('./backlog-sync.js')).deliverTree(root, id, { status: 'DONE', summary: optionValue('--summary') }, syncOptions)
+          : await syncDeliver(root, id, { status: 'DONE', ...(optionValue('--summary') === undefined ? {} : { summary: optionValue('--summary') }) }, syncOptions);
+        if (json) { print(result); }
+        else {
+          const lines: string[] = [];
+          lines.push(section(`Sync deliver: ${id}`));
+          if ('nodes' in result) {
+            lines.push(kv('Delivered', String(result.completed)));
+            lines.push(kv('Blocked', String(result.blocked)));
+            for (const node of result.nodes) lines.push(bullet(`${node.relativePath} [${node.state}]${node.error ? ` ${node.error}` : ''}${node.conflict ? ` ${node.conflict}` : ''}`));
+          } else {
+            lines.push(kv('State', result.state));
+            lines.push(kv('Remote ID', result.remoteId ?? '(none)'));
+            const delivery = (result as any).delivery;
+            if (delivery?.status) lines.push(kv('Delivery', delivery.status));
+            if (delivery?.failedTargets?.length) lines.push(kv('Failed targets', delivery.failedTargets.join(', ')));
+          }
+          console.log(box(lines));
+        }
       } else {
         const yes = args.includes('--yes');
-        if (!yes && action !== 'status' && isTty()) {
+        if (!yes && isTty()) {
           const confirmed = await confirm(`Are you sure you want to \`${action}\` change ${id}?`);
           if (!confirmed) { console.log(warn('Cancelled.')); return; }
         }
@@ -1128,7 +1367,7 @@ Options:
               item.record.kind,
               item.record.outcome,
               item.freshness.status,
-              item.freshness.basis,
+              `${item.freshness.basis}${item.freshness.basis === 'artifact' ? item.freshness.sourceBound ? '/bound' : '/unbound' : ''}`,
               links.join('; ') || '(none)',
               item.record.capturedAt,
               item.record.summary.split(/\r?\n/)[0].slice(0, 50),
@@ -1145,22 +1384,35 @@ Options:
     }
     else if (command === 'backlog' && positional[1] === 'import') {
       if (args.includes('--help') || args.includes('-h')) {
-        showCommandHelp('backlog import', `notchlet backlog import <item-key|title|id> [--product-id <id>]
+        showCommandHelp('backlog import', `notchlet backlog import <item-key|title|id> [--product-id <id>] [--tree] [--no-children] [--no-ancestors] [--max-items <n>] [--mode quick|standard] [--dry-run]
 
-  Import a backlog item as a change.
+  Import a backlog item as a change, or import its platform subtree as a local backlog tree.
 
 Options:
   <item-key|title|id>  Backlog key, title, or numeric ID
   --product-id <id>    Product ID (defaults to the workspace binding)
+  --tree               Import the item and its descendants as nested changes with backlog.json sidecars
+  --no-children        Import only the selected item (and ancestors) with --tree
+  --no-ancestors       Do not scaffold ancestor shells with --tree
+  --max-items <n>      Maximum nodes imported in one run (default 200)
+  --mode <schema>      Schema for scaffolded nodes: quick or standard (default quick)
+  --dry-run            Report the planned tree without writing files
   --server <url>     Notchlet server (default: ${DEFAULT_SERVER})
   --endpoint <url>   Override MCP endpoint
   --allow-file-token-store   Allow restricted file credential storage
   --workspace <root>   Set workspace root
   --json               Machine-readable JSON output`);
       }
+      assertOptions(['--product-id', '--tree', '--no-children', '--no-ancestors', '--max-items', '--mode', '--dry-run', '--server', '--endpoint', '--allow-file-token-store'], 'backlog import');
       const root = await requireWorkspace('backlog import');
       const itemQuery = positional[2] ?? (isTty() ? await prompt('Backlog item key or title: ') : undefined);
       if (!itemQuery) fail('usage_error', usage, 'Provide a backlog key/title/ID, for example `APP-42` or `Improve onboarding`.', 64);
+      const tree = args.includes('--tree');
+      const importMode = optionValue('--mode');
+      if (importMode !== undefined && !['quick', 'standard'].includes(importMode)) fail('usage_error', 'Use --mode quick or --mode standard.', 'Imported backlog nodes default to the quick schema.', 64);
+      const maxItemsText = optionValue('--max-items');
+      const maxItems = maxItemsText === undefined ? undefined : Number(maxItemsText);
+      if (maxItems !== undefined && (!Number.isSafeInteger(maxItems) || maxItems < 1)) fail('usage_error', '--max-items must be a positive integer.', 'Use a bounded value such as --max-items 200.', 64);
       let productId = Number(optionValue('--product-id'));
       if (!Number.isSafeInteger(productId) || productId < 1) {
         try { productId = Number(JSON.parse(await readFile(path.join(root, '.notchlet', 'workspace.json'), 'utf8')).binding?.productId); }
@@ -1181,9 +1433,135 @@ Options:
         itemId = Number(selected.id);
       }
       if (!Number.isSafeInteger(itemId) || itemId < 1) fail('usage_error', usage, 'Provide a valid backlog key, title, or numeric ID.', 64);
+      if (tree) {
+        const { importBacklogTree } = await import('./backlog-sync.js');
+        const result = await importBacklogTree(root, {
+          productId, itemId,
+          includeChildren: !args.includes('--no-children'),
+          includeAncestors: !args.includes('--no-ancestors'),
+          ...(maxItems === undefined ? {} : { maxItems }),
+          ...(importMode === undefined ? {} : { mode: importMode as 'quick' | 'standard' }),
+          dryRun: args.includes('--dry-run'),
+          server: optionValue('--server'), endpoint: optionValue('--endpoint'),
+          allowFileStore: args.includes('--allow-file-token-store'),
+        });
+        if (json) { print(result); }
+        else {
+          const lines: string[] = [];
+          lines.push(section(result.dryRun ? 'Backlog tree import preview' : 'Backlog tree imported'));
+          lines.push(kv('Root item', `${itemId} (product ${productId})`));
+          lines.push(kv('Nodes', String(result.nodes.length)));
+          lines.push(kv('Created', String(result.imported.filter(node => node.action === 'created').length)));
+          lines.push(kv('Reused', String(result.imported.filter(node => node.action !== 'created').length)));
+          if (result.truncated) lines.push(bullet(warn(`Import stopped at the ${maxItems ?? 200}-node limit; re-run from a deeper item or raise --max-items.`)));
+          for (const node of result.nodes) lines.push(bullet(`${node.itemType} ${node.relativePath} (#${node.itemId})`));
+          console.log(box(lines));
+        }
+        return;
+      }
       const { importBacklogItem } = await import('./integration.js');
       const change = await importBacklogItem(root, { itemId, productId, server: optionValue('--server'), endpoint: optionValue('--endpoint'), allowFileStore: args.includes('--allow-file-token-store') });
       printWithSync({ change }, await syncIfAutomatic(root, change.id), `Imported backlog item ${itemId} as change ${change.id}.`);
+    }
+    else if (command === 'backlog' && positional[1] === 'set') {
+      if (args.includes('--help') || args.includes('-h')) {
+        showCommandHelp('backlog set', `notchlet backlog set <ref> [--title <text>] [--description <text>]
+  [--priority LOW|MEDIUM|HIGH|URGENT] [--points <n>] [--start <iso>] [--due <iso>]
+
+  Author planning fields in the local backlog.json sidecar. No remote write:
+  \`notchlet sync push --tree --yes\` publishes them when the remote has not changed the same field.
+
+Options:
+  <ref>                Change ID, backlog key, title, or relative path
+  --title <text>       Item title
+  --description <text> Item description (create-only on push unless set here)
+  --priority <level>   LOW, MEDIUM, HIGH, or URGENT
+  --points <n>         Story points (non-negative number)
+  --start <iso>        Planned start date (ISO 8601)
+  --due <iso>          Planned due date (ISO 8601)
+  --workspace <root>   Set workspace root
+  --json               Machine-readable JSON output`);
+      }
+      assertOptions(['--title', '--description', '--priority', '--points', '--start', '--due', '--workspace'], 'backlog set');
+      const root = await requireWorkspace('backlog set');
+      const reference = positional[2] ?? (isTty() ? await prompt('Change or backlog item: ') : undefined);
+      if (!reference) fail('usage_error', usage, 'Provide a change reference, for example `notchlet backlog set alpha --priority HIGH`.', 64);
+      const title = optionValue('--title');
+      const description = optionValue('--description');
+      const priorityText = optionValue('--priority');
+      const priority = priorityText?.toUpperCase();
+      if (priority !== undefined && !['LOW', 'MEDIUM', 'HIGH', 'URGENT'].includes(priority)) fail('usage_error', '--priority must be LOW, MEDIUM, HIGH, or URGENT.', 'Priority affects platform ordering only; status stays unchanged.', 64);
+      const pointsText = optionValue('--points');
+      const storyPoints = pointsText === undefined ? undefined : Number(pointsText);
+      if (storyPoints !== undefined && (!Number.isFinite(storyPoints) || storyPoints < 0)) fail('usage_error', '--points must be a non-negative number.', 'Use a value such as --points 3.', 64);
+      const startDate = optionValue('--start');
+      const dueDate = optionValue('--due');
+      for (const [flag, date] of [['--start', startDate], ['--due', dueDate]] as const) {
+        if (date !== undefined && Number.isNaN(Date.parse(date))) fail('usage_error', `${flag} must be an ISO 8601 date or date-time.`, 'Use a value such as 2026-11-23 or 2026-11-23T09:00:00Z.', 64);
+      }
+      if ([title, description, priority, storyPoints, startDate, dueDate].every(value => value === undefined)) fail('usage_error', 'Provide at least one planning field.', 'For example: `notchlet backlog set alpha --priority HIGH --due 2026-12-01`.', 64);
+      const { updateLocalBacklogPlanning } = await import('./backlog-sync.js');
+      const result = await updateLocalBacklogPlanning(root, reference, {
+        ...(title === undefined ? {} : { title }),
+        ...(description === undefined ? {} : { description }),
+        ...(priority === undefined ? {} : { priorityLevel: priority as 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT' }),
+        ...(storyPoints === undefined ? {} : { storyPoints }),
+        ...(startDate === undefined ? {} : { startDate }),
+        ...(dueDate === undefined ? {} : { dueDate }),
+      });
+      if (json) { print(result); }
+      else {
+        const lines: string[] = [];
+        lines.push(section('Planning fields updated locally'));
+        lines.push(kv('Node', result.relativePath));
+        lines.push(kv('Item', result.itemId === undefined ? 'not linked' : `#${result.itemId}`));
+        lines.push(kv('Title', result.title));
+        if (result.planning.priorityLevel !== undefined) lines.push(kv('Priority', result.planning.priorityLevel));
+        if (result.planning.storyPoints !== undefined) lines.push(kv('Story points', String(result.planning.storyPoints)));
+        if (result.planning.startDate !== undefined) lines.push(kv('Start', result.planning.startDate));
+        if (result.planning.dueDate !== undefined) lines.push(kv('Due', result.planning.dueDate));
+        if (result.planning.description !== undefined) lines.push(kv('Description', result.planning.description));
+        lines.push(bullet('No remote write. Run `notchlet sync push --tree --yes` to publish.'));
+        console.log(box(lines));
+      }
+    }
+    else if (command === 'migrate') {
+      if (args.includes('--help') || args.includes('-h')) {
+        showCommandHelp('migrate', `notchlet migrate [--dry-run|--apply] [--rename] [--legacy-dir <name>]
+
+  Re-home flat legacy changes without touching nested backlog trees.
+  Dry run by default; --apply writes a journal at .notchlet/.local/migrate.json.
+
+Options:
+  --apply              Perform the moves (default is a dry-run preview)
+  --rename             Rename linked nodes to key-first folders (e.g. nt-12-login)
+  --legacy-dir <name>  Namespace for unlinked legacy changes (default "legacy")
+  --workspace <root>   Set workspace root
+  --json               Machine-readable JSON output`);
+      }
+      assertOptions(['--dry-run', '--apply', '--rename', '--legacy-dir', '--workspace'], 'migrate');
+      if (args.includes('--dry-run') && args.includes('--apply')) fail('usage_error', 'Choose either --dry-run or --apply.', 'Run `notchlet migrate --apply` to perform the moves.', 64);
+      const root = await requireWorkspace('migrate');
+      const { migrateWorkspace } = await import('./migrate.js');
+      const result = await migrateWorkspace(root, {
+        apply: args.includes('--apply'),
+        rename: args.includes('--rename'),
+        ...(optionValue('--legacy-dir') === undefined ? {} : { legacyDir: optionValue('--legacy-dir')! }),
+      });
+      if (json) { print(result); }
+      else {
+        const lines: string[] = [];
+        lines.push(section(result.dryRun ? 'Migration preview' : 'Migration applied'));
+        lines.push(kv('Scanned', String(result.scanned)));
+        lines.push(kv(result.dryRun ? 'Planned' : 'Moved', String(result.dryRun ? result.moves.filter(move => move.action === 'move').length : result.moved)));
+        lines.push(kv('Skipped', String(result.skipped)));
+        if (result.blocked) lines.push(bullet(warn(`${result.blocked} change(s) need attention before they can move.`)));
+        for (const move of result.moves) {
+          lines.push(bullet(`${move.action === 'move' ? (result.dryRun ? 'would move' : 'moved') : 'skip'} ${move.from}${move.action === 'move' ? ` -> ${move.to}` : move.reason ? ` (${move.reason})` : ''}`));
+        }
+        if (result.dryRun) lines.push(`Run \`notchlet migrate --apply${result.rename ? ' --rename' : ''}\` to apply.`);
+        console.log(box(lines));
+      }
     }
     else if (command === 'mcp') {
       const action = positional[1];
@@ -1484,8 +1862,11 @@ Options:
         if ((action === 'add' || action === 'update') && isChangeKind(helpKind)) showCommandHelp(`change ${action} ${helpKind}`, changeItemHelp(action, helpKind));
         showCommandHelp('change', `notchlet change <action> [options]
 
-  new <name> [--quick] [--from <plan.json> [--dry-run] [--no-render]]
-                                 Create a change, optionally importing a declarative plan
+  new <name> [--quick] [--as epic|story|task|subtask --parent <ref>]
+  new [<name>] --from <plan.json|tree.json> [--dry-run] [--no-render] [--markdown]
+  new <name> --as epic|story|task|subtask [--parent <ref>] [--title <text>] [--slug <slug>]
+                                 Create a change, backlog node, or declarative plan import
+  tree [<name|id|path>] [--depth <n>]   Show the backlog tree or one node's subtree
   list [--archived]              List active changes, or archived changes with --archived
   show <name|id>                 Show change details, content, capability, and readiness
   path <name|id> [artifact]      Print the resolved change directory or declared artifact path
@@ -1497,7 +1878,7 @@ Options:
   remove <name|id> <kind> <id> [--revision <n>]   Remove an authored item
   convert <name|id> --schema <q|s> [--revision <n>] Convert a change schema
   apply <name|id> --file <path> [--revision <n>]  Apply an ordered batch of authoring operations
-  render <name|id> [--check|--write] [--force]    Render model-derived proposal/spec/tasks artifacts
+  render <name|id> [--check|--write] [--force] [--tree]    Render model-derived proposal/spec/tasks artifacts
   baseline <name|id> [--capability <name>] [--revision <n>]
                                  Capture the current capability baseline revision
   delta <name|id> add|update|remove|delete --requirement <id> [--rationale <text>]
@@ -1505,7 +1886,7 @@ Options:
   plan validate <path>           Validate a change plan without importing it
   plan status <name|id>          Show plan provenance, drift, validation, and contract SHA-256 (archived read-only)
   plan sync <name|id>            Accept the current plan file hash after reviewing drift
-  close <name|id> --preview | [--baseline-revision <n>]   Close and archive a change
+  close <name|id> --preview [--fail-on-blockers] | [--baseline-revision <n>]   Close and archive a change
 
 Authored content options:
   --id <id> --title <text> --description <text>        Requirement/task/check fields
@@ -1513,13 +1894,25 @@ Authored content options:
   --kind command|http|browser|ui|manual                     Check execution kind (browser remains an HTTP alias)
   --url <url> --expected-status <code>                   HTTP check target and expected status
   --expected-body-contains <text> --expected-json <json> HTTP body and JSON subset assertions
-  --expected-json-contains <json>                        HTTP JSON containment (extra/items unordered allowed)
+  --expected-json-contains <json>                        HTTP JSON containment (extra keys/items allowed; empty array requires empty)
   --expected-json-at <json>                              HTTP JSON path assertions: {"path":"$.total","gte":100}
   --expected-header "Name: value"                        Expected HTTP response header (repeatable)
+  --wait-for <selector> --settle-ms <ms>                 UI readiness wait and settle time
+  --expected-selector <selector>                         UI markup presence (repeatable)
+  --expected-visible-selector <selector>                 UI visibility assertion (repeatable)
+  --expected-hidden-selector <selector>                  UI hidden-or-absent assertion; add --expected-selector to also require presence (repeatable)
+  --expected-absent-selector <selector>                  UI DOM-absence assertion; present-but-hidden fails (repeatable)
+  --expected-enabled-selector <selector>                 UI enabled-state assertion (repeatable)
+  --expected-text <text> --expected-title <text>         Rendered text/title assertions
+  --expected-scoped-text <json>                          Scoped text: {"selector":"#x","contains":"y"} (repeatable)
+  --step <json>                                          UI step: {"action":"click","selector":"#save"} (repeatable)
+  --capture-artifacts never|on-failure|always            UI capture policy
+  --expect-no-console-errors                             Fail on console errors or uncaught exceptions
   --working-directory <dir>                              Workspace-relative command working directory
   --requirement <id[,id]>                               Requirement ID(s) for a scenario/task/check
   --scenario <id[,id]>                                  Scenario ID(s) linked to a check
-  --task <id[,id]>                                      Task ID(s) linked to a check
+  --task <id[,id]>                                      Task ID(s) linked to a check (prompted when omitted in a terminal)
+  --no-prompt                                           Skip interactive authoring prompts
   --when <text> --then <text>                           Acceptance scenario statements
   --decision <text> --rationale <text>                  Design decision fields
   --depends-on <id[,id]>                                Task dependency IDs
@@ -1539,8 +1932,12 @@ Authored content options:
 
 Options:
   --quick                  Create a quick (minimal) change
-  --from <path>            JSON change plan to import during \`change new\`
-  --dry-run                Preview a plan import without writing files
+  --as <type>              Backlog node type: epic, story, task, or subtask
+  --parent <ref>           Parent node for --as (EPIC > STORY > TASK > SUBTASK)
+  --title <text>           Display title for a backlog node (defaults to the name)
+  --slug <slug>            Folder slug for a backlog node (defaults to the title)
+  --from <path>            JSON change plan or tree plan ({schemaVersion, tree}) to import during \`change new\`
+  --dry-run                Preview a plan or tree import without writing files; tree previews mark create/reuse/conflict
   --render                 Render canonical artifacts during plan import (default)
   --no-render              Import only plan-provided artifact contents
   --markdown               Also declare and render optional proposal.md/spec.md/tasks.md views
@@ -1550,8 +1947,10 @@ Options:
   --write                  Atomically write rendered artifacts and bump the revision once (render)
   --force                  Overwrite artifacts without the generated-content marker (render)
   --preview                Preview closure without changing files (for close)
+  --fail-on-blockers       With --preview, exit 1 when closure blockers remain (for CI)
   --baseline-revision <n>  Expected baseline revision for close (standard and delta changes only)
   --accept-plan-drift      Close despite source-plan drift, a missing plan, or plan validation errors
+  --accept-artifact-basis  Close when current evidence binds only change artifacts, not application source
   --yes                    Skip confirmation prompt (for close)
   --archived               Select archived changes (list)
   --format json            Export format (export)
@@ -1559,9 +1958,17 @@ Options:
   --json                   Machine-readable JSON output`);
       }
       if (action === 'new') {
-        assertOptions(['--quick', '--from', '--dry-run', '--render', '--no-render', '--markdown'], 'change new');
+        assertOptions(['--quick', '--from', '--dry-run', '--render', '--no-render', '--markdown', '--as', '--parent', '--title', '--slug'], 'change new');
         if ((args.includes('--dry-run') || args.includes('--render') || args.includes('--no-render') || args.includes('--markdown')) && !optionValue('--from')) fail('usage_error', '--dry-run, --render, --no-render, and --markdown require --from <path>.', 'Run `notchlet change new <name> --from plan.json --dry-run`.', 64);
         if (args.includes('--render') && args.includes('--no-render')) fail('usage_error', 'Choose either --render or --no-render.', 'Plan import renders canonical artifacts by default; pass --no-render to disable it.', 64);
+        const nodeTypeText = optionValue('--as')?.toLowerCase();
+        if (nodeTypeText !== undefined && !['epic', 'story', 'task', 'subtask'].includes(nodeTypeText)) fail('usage_error', 'Use --as epic, story, task, or subtask.', 'Backlog nodes nest EPIC > STORY > TASK > SUBTASK.', 64);
+        const nodeType = nodeTypeText?.toUpperCase() as BacklogItemType | undefined;
+        const parentRef = optionValue('--parent');
+        const nodeTitle = optionValue('--title');
+        const nodeSlug = optionValue('--slug');
+        if ((parentRef !== undefined || nodeTitle !== undefined || nodeSlug !== undefined) && nodeType === undefined) fail('usage_error', '--parent, --title, and --slug require --as <type>.', 'Run `notchlet change new <name> --as story --parent <epic>`.', 64);
+        if (nodeType !== undefined && args.includes('--dry-run')) fail('usage_error', '--dry-run cannot preview a backlog node yet.', 'Preview the plan without --as, then create the node and import the plan.', 64);
         const renderPlanArtifacts = !args.includes('--no-render');
         const planPath = optionValue('--from');
         if (planPath) {
@@ -1572,6 +1979,71 @@ Options:
           let planValue: unknown;
           try { planValue = JSON.parse(text) as unknown; }
           catch { fail('malformed_plan', 'Change plan is not valid JSON.', 'Repair the plan file syntax and try again.', 1); }
+          const isTreePlan = Boolean(planValue && typeof planValue === 'object' && !Array.isArray(planValue) && 'tree' in (planValue as Record<string, unknown>));
+          if (isTreePlan) {
+            if (positional[2] || nodeType !== undefined || parentRef !== undefined || nodeTitle !== undefined || nodeSlug !== undefined || args.includes('--quick')) {
+              fail('usage_error', 'Tree plans carry their own names, types, and modes; remove the positional name and --as/--parent/--title/--slug/--quick.', 'Run `notchlet change new --from tree.json --dry-run`.', 64);
+            }
+            const treePlan = parseChangeTreePlan(planValue);
+            const projected = projectChangeTreePlan(treePlan);
+            const flatten = (node: typeof projected): Array<typeof projected> => [node, ...node.children.flatMap(child => flatten(child))];
+            const nodes = flatten(projected);
+            const markdown = args.includes('--markdown');
+            const render = renderPlanArtifacts || markdown;
+            if (args.includes('--dry-run')) {
+              const foundRoot = await workspace();
+              const existingAt = async (relativePath: string, itemType: string, title: string): Promise<'create' | 'reuse' | 'conflict'> => {
+                if (foundRoot === null) return 'create';
+                const segments = relativePath.split('/');
+                const archived = path.join(foundRoot, '.notchlet', 'archive', ...segments, 'tasks.json');
+                try { await access(archived); return 'conflict'; } catch { /* not archived */ }
+                const activeDirectory = path.join(foundRoot, '.notchlet', 'changes', ...segments);
+                try { await access(path.join(activeDirectory, 'tasks.json')); } catch { return 'create'; }
+                const sidecar = await readBacklogSidecar(activeDirectory);
+                return sidecar && sidecar.node.itemType === itemType && sidecar.node.title === title ? 'reuse' : 'conflict';
+              };
+              const projectedNodes = [];
+              for (const node of nodes) {
+                projectedNodes.push({
+                  relativePath: node.relativePath,
+                  itemType: node.itemType,
+                  title: node.title,
+                  status: await existingAt(node.relativePath, node.itemType, node.title),
+                  mode: node.change.mode,
+                  requirements: node.change.requirements.length,
+                  checks: node.change.checks.length,
+                  tasks: node.change.tasks.length,
+                  artifacts: Object.keys(node.change.artifacts),
+                });
+              }
+              print({ dryRun: true, tree: { root: projected.relativePath, nodes: projectedNodes } }, [
+                section('Tree plan preview'),
+                kv('Root', `${projected.relativePath} (${projected.itemType} ${projected.title})`),
+                kv('Nodes', String(nodes.length)),
+                ...projectedNodes.map(node => bullet(`${node.status.padEnd(8)} ${node.relativePath} (${node.itemType} ${node.title}): ${node.requirements} requirement${node.requirements === 1 ? '' : 's'}, ${node.checks} check${node.checks === 1 ? '' : 's'}, ${node.tasks} task${node.tasks === 1 ? '' : 's'}, ${node.artifacts.length} artifact${node.artifacts.length === 1 ? '' : 's'}`)),
+                bullet('Rerunning reuses nodes already at the same path with the same type and title; conflicting nodes abort the import before any write.'),
+                bullet(warn('Runtime readiness is not checked during dry-run.')),
+              ].join('\n'));
+              return;
+            }
+            const root = await requireWorkspace('change new');
+            const relativePlan = path.relative(path.resolve(root), planFile).split(path.sep).join('/');
+            const sourcePlan = relativePlan && !relativePlan.startsWith('..') && !path.isAbsolute(relativePlan)
+              ? { path: relativePlan, sha256: createHash('sha256').update(text).digest('hex'), importedAt: new Date().toISOString() }
+              : undefined;
+            const imported = await importChangeTree(root, treePlan, { render, markdown, ...(sourcePlan === undefined ? {} : { sourcePlan }) });
+            const createdCount = imported.nodes.filter(node => node.status === 'created').length;
+            printWithSync(
+              { tree: imported },
+              await syncIfAutomatic(root, imported.root),
+              [
+                section(`Created tree ${imported.root}`),
+                kv('Nodes', `${imported.nodes.length} (${createdCount} created, ${imported.nodes.length - createdCount} reused)`),
+                ...imported.nodes.map(node => bullet(`${node.status} ${node.relativePath} (${node.itemType}): ${node.written.length} artifact${node.written.length === 1 ? '' : 's'} written`)),
+              ].join('\n'),
+            );
+            return;
+          }
           const plan = parseChangePlan(planValue);
           // The positional name overrides the plan name so a plan can be dry-run under an alias.
           const name = positional[2] ?? plan.name;
@@ -1627,32 +2099,17 @@ Options:
             return;
           }
           const root = await requireWorkspace('change new');
-          const change = await scaffold(root, name, mode ?? 'standard');
+          const targetId = nodeType
+            ? (await scaffoldNode(root, { name, itemType: nodeType, ...(parentRef === undefined ? {} : { parent: parentRef }), ...(nodeTitle === undefined ? {} : { title: nodeTitle }), ...(nodeSlug === undefined ? {} : { slug: nodeSlug }), mode: mode ?? 'standard' })).relativePath
+            : (await scaffold(root, name, mode ?? 'standard')).id;
           const markdown = args.includes('--markdown');
           const relativePlan = path.relative(path.resolve(root), planFile).split(path.sep).join('/');
           const sourcePlan = relativePlan && !relativePlan.startsWith('..') && !path.isAbsolute(relativePlan)
             ? { path: relativePlan, sha256: createHash('sha256').update(text).digest('hex'), importedAt: new Date().toISOString() }
             : undefined;
-          const imported = await importChangePlan(root, change.id, plan, { render: renderPlanArtifacts || markdown, markdown, name, ...(sourcePlan === undefined ? {} : { sourcePlan }) });
-          const evidenceAdvisory = imported.change.evidencePolicy === undefined
-            ? {
-              code: 'evidence_policy_default',
-              message: 'No evidencePolicy was declared; the default per-task policy warns when tasks complete before evidence exists.',
-              recovery: `Use --evidence-policy end-of-change when one final verification batch covers all tasks, or persist it with \`notchlet change update ${imported.change.id} --evidence-policy end-of-change\`.`,
-              options: { perTask: 'Warn at each task completion.', endOfChange: 'Suppress per-task warnings; closure still requires current checks.' },
-            }
-            : undefined;
-          printWithSync(
-            { ...imported.change, import: { written: imported.written, rendered: imported.rendered }, ...(evidenceAdvisory === undefined ? {} : { advisory: evidenceAdvisory }) },
-            await syncIfAutomatic(root, imported.change.id),
-            `Created change ${imported.change.id}: ${imported.change.name} from plan (${imported.written.length} artifact${imported.written.length === 1 ? '' : 's'} written).${evidenceAdvisory === undefined ? '' : `\nAdvisory: ${evidenceAdvisory.message} ${evidenceAdvisory.recovery}`}`,
-          );
-        } else {
-          const name = positional[2] ?? (isTty() ? await prompt('Change name: ') : undefined);
-          if (!name) fail('usage_error', usage, 'Run `notchlet --help` for command syntax.', 64);
-          const root = await requireWorkspace('change new');
-          const change = await scaffold(root, name, args.includes('--quick') ? 'quick' : 'standard');
-          const evidenceAdvisory = change.evidencePolicy === undefined
+          const imported = await importChangePlan(root, targetId, plan, { render: renderPlanArtifacts || markdown, markdown, name, ...(sourcePlan === undefined ? {} : { sourcePlan }) });
+          const change = imported.change;
+          const evidenceAdvisory = change.evidencePolicy === undefined && !(nodeType && parentRef !== undefined)
             ? {
               code: 'evidence_policy_default',
               message: 'No evidencePolicy was declared; the default per-task policy warns when tasks complete before evidence exists.',
@@ -1660,7 +2117,42 @@ Options:
               options: { perTask: 'Warn at each task completion.', endOfChange: 'Suppress per-task warnings; closure still requires current checks.' },
             }
             : undefined;
-          printWithSync({ ...change, ...(evidenceAdvisory === undefined ? {} : { advisory: evidenceAdvisory }) }, await syncIfAutomatic(root, change.id), `Created change ${change.id}: ${change.name}.${evidenceAdvisory === undefined ? '' : `\nAdvisory: ${evidenceAdvisory.message} ${evidenceAdvisory.recovery}`}`);
+          printWithSync(
+            { ...change, ...(nodeType ? { backlogType: nodeType, relativePath: targetId } : {}), import: { written: imported.written, rendered: imported.rendered }, ...(evidenceAdvisory === undefined ? {} : { advisory: evidenceAdvisory }) },
+            await syncIfAutomatic(root, targetId),
+            `Created ${nodeType ? `${nodeType} ${targetId}` : `change ${change.id}`}: ${change.name} from plan (${imported.written.length} artifact${imported.written.length === 1 ? '' : 's'} written).${evidenceAdvisory === undefined ? '' : `\nAdvisory: ${evidenceAdvisory.message} ${evidenceAdvisory.recovery}`}`,
+          );
+        } else {
+          const name = positional[2] ?? (isTty() ? await prompt('Change name: ') : undefined);
+          if (!name) fail('usage_error', usage, 'Run `notchlet --help` for command syntax.', 64);
+          const root = await requireWorkspace('change new');
+          if (nodeType) {
+            const node = await scaffoldNode(root, { name, itemType: nodeType, ...(parentRef === undefined ? {} : { parent: parentRef }), ...(nodeTitle === undefined ? {} : { title: nodeTitle }), ...(nodeSlug === undefined ? {} : { slug: nodeSlug }) });
+            const advisory = node.change.evidencePolicy === undefined && parentRef === undefined
+              ? {
+                code: 'evidence_policy_default',
+                message: 'No evidencePolicy was declared; the default per-task policy warns when tasks complete before evidence exists.',
+                recovery: `Use --evidence-policy end-of-change when one final verification batch covers all tasks, or persist it with \`notchlet change update ${node.relativePath} --evidence-policy end-of-change\`.`,
+                options: { perTask: 'Warn at each task completion.', endOfChange: 'Suppress per-task warnings; closure still requires current checks.' },
+              }
+              : undefined;
+            printWithSync(
+              { ...node.change, backlogType: nodeType, relativePath: node.relativePath, backlog: node.backlog, ...(advisory === undefined ? {} : { advisory }) },
+              await syncIfAutomatic(root, node.relativePath),
+              `Created ${nodeType} ${node.relativePath}: ${node.change.name}.${advisory === undefined ? '' : `\nAdvisory: ${advisory.message} ${advisory.recovery}`}`,
+            );
+          } else {
+            const change = await scaffold(root, name, args.includes('--quick') ? 'quick' : 'standard');
+            const evidenceAdvisory = change.evidencePolicy === undefined
+              ? {
+                code: 'evidence_policy_default',
+                message: 'No evidencePolicy was declared; the default per-task policy warns when tasks complete before evidence exists.',
+                recovery: `Use --evidence-policy end-of-change when one final verification batch covers all tasks, or persist it with \`notchlet change update ${change.id} --evidence-policy end-of-change\`.`,
+                options: { perTask: 'Warn at each task completion.', endOfChange: 'Suppress per-task warnings; closure still requires current checks.' },
+              }
+              : undefined;
+            printWithSync({ ...change, ...(evidenceAdvisory === undefined ? {} : { advisory: evidenceAdvisory }) }, await syncIfAutomatic(root, change.id), `Created change ${change.id}: ${change.name}.${evidenceAdvisory === undefined ? '' : `\nAdvisory: ${evidenceAdvisory.message} ${evidenceAdvisory.recovery}`}`);
+          }
         }
       } else if (action === 'restore') {
         assertOptions([], 'change restore');
@@ -1672,14 +2164,15 @@ Options:
         const change = await restoreChange(root, target.id);
         printWithSync(change, await syncIfAutomatic(root, change.id), `Restored change ${change.id}: ${change.name}.`);
       } else if (action === 'path') {
-        assertOptions([], 'change path');
+        assertOptions(['--relative', '--absolute'], 'change path');
+        if (args.includes('--relative') && args.includes('--absolute')) fail('usage_error', 'Choose either --relative or --absolute.', 'Run `notchlet change path <change> --relative`.', 64);
         const root = await requireWorkspace('change path');
         const changeRef = positional[2];
         if (!changeRef) fail('usage_error', usage, 'Use `notchlet change path <change> [artifact]`.', 64);
         const target = await resolveChangeTarget(root, changeRef);
         const change = target.archived ? await readArchivedChange(root, target.id) : await readChange(root, target.id);
         const artifact = positional[3];
-        const relativeDirectory = ['.notchlet', target.archived ? 'archive' : 'changes', target.id].join('/');
+        const relativeDirectory = ['.notchlet', target.archived ? 'archive' : 'changes', ...target.id.split('/')].join('/');
         let relative = relativeDirectory;
         if (artifact !== undefined) {
           if (!Object.prototype.hasOwnProperty.call(change.artifacts, artifact)) {
@@ -1688,7 +2181,10 @@ Options:
           relative = [relativeDirectory, change.artifacts[artifact]].join('/');
         }
         const data = { changeId: change.id, archived: target.archived, ...(artifact === undefined ? {} : { artifact, role: artifactRole(artifact) }), path: relative, absolutePath: path.join(root, ...relative.split('/')) };
-        print(data, [kv('Change', change.id), ...(artifact === undefined ? [] : [kv('Artifact', `${artifact} [${artifactRole(artifact)}]`)]), kv('Path', relative), kv('Absolute', path.join(root, ...relative.split('/')))].join('\n'));
+        if (json) print(data);
+        else if (args.includes('--relative')) console.log(relative);
+        else if (args.includes('--absolute')) console.log(path.join(root, ...relative.split('/')));
+        else console.log([kv('Change', change.id), ...(artifact === undefined ? [] : [kv('Artifact', `${artifact} [${artifactRole(artifact)}]`)]), kv('Path', relative), kv('Absolute', path.join(root, ...relative.split('/')))].join('\n'));
       } else if (action === 'export') {
         assertOptions(['--format'], 'change export');
         const format = optionValue('--format') ?? 'json';
@@ -1698,14 +2194,15 @@ Options:
         if (!changeRef) fail('usage_error', usage, 'Use `notchlet change export <change> [--format json]`.', 64);
         const target = await resolveChangeTarget(root, changeRef);
         const change = target.archived ? await readArchivedChange(root, target.id) : await readChange(root, target.id);
-        const [evidence, contents, artifactState, closure] = await Promise.all([
+        const [evidence, contents, artifactState, closure, closureIntegrity] = await Promise.all([
           readEvidence(root, target.id),
           artifactContents(root, target.id, change, { archived: target.archived }),
           inspectChangeArtifacts(root, target.id),
           target.archived ? readArchivedClosure(root, target.id) : Promise.resolve(undefined),
+          inspectClosureIntegrity(root, target.id),
         ]);
-        const closureView = target.archived ? await readFile(path.join(root, '.notchlet', 'archive', target.id, 'closure.md'), 'utf8').catch(() => undefined) : undefined;
-        const exported = { change, archived: target.archived, ...(closure ? { closure } : {}), ...(closureView === undefined ? {} : { closureView }), evidence, artifacts: artifactState.artifacts, contents };
+        const closureView = target.archived ? await readFile(path.join(root, '.notchlet', 'archive', ...target.id.split('/'), 'closure.md'), 'utf8').catch(() => undefined) : undefined;
+        const exported = { change, archived: target.archived, closureIntegrity, ...(closure ? { closure } : {}), ...(closureView === undefined ? {} : { closureView }), evidence, artifacts: artifactState.artifacts, contents };
         const evidenceFiles: Array<{ evidenceId: string; role: 'log' | 'attachment'; path: string; sha256: string; bytes: number; mediaType?: string; encoding: 'utf8' | 'base64'; content: string }> = [];
         for (const record of evidence) {
           if (record.logPath) {
@@ -1723,6 +2220,24 @@ Options:
         }
         if (json) { print({ ...exported, evidenceFiles }); }
         else console.log(JSON.stringify({ ...exported, evidenceFiles }, null, 2));
+      } else if (action === 'tree') {
+        assertOptions(['--depth'], 'change tree');
+        const root = await requireWorkspace('change tree');
+        const depthText = optionValue('--depth');
+        const depth = depthText === undefined ? undefined : Number(depthText);
+        if (depth !== undefined && (!Number.isInteger(depth) || depth < 1)) fail('usage_error', 'Use --depth with a positive integer.', 'Run `notchlet change tree --depth 3`.', 64);
+        const tree = await buildChangeTree(root);
+        const ref = positional[2];
+        if (ref) {
+          const node = await buildNode(root, ref);
+          const subtreeWarnings = await closureIntegrityWarnings(root, flattenTree(node));
+          if (json) print({ workspace: root, tree: { ...(treeJson(tree) as object), warnings: [...tree.warnings, ...subtreeWarnings], roots: [treeNodeJson(node)] } });
+          else console.log(formatSubtree(node, { ...(depth === undefined ? {} : { depth }), showWarnings: true, warnings: subtreeWarnings }));
+        } else {
+          tree.warnings.push(...await closureIntegrityWarnings(root, tree.nodes));
+          if (json) print({ workspace: root, tree: treeJson(tree) });
+          else console.log(formatChangeTree(tree, { ...(depth === undefined ? {} : { depth }), showWarnings: true }));
+        }
       } else if (action === 'list') {
         assertOptions(['--archived'], 'change list');
         const root = await workspace();
@@ -1752,10 +2267,13 @@ Options:
         if (!target) fail('usage_error', usage, 'Provide a change name or ID from `notchlet change list`.', 64);
         const change = target.archived ? await readArchivedChange(root, target.id) : await readChange(root, target.id);
         const contents = await artifactContents(root, target.id, change, { archived: target.archived });
-        const readinessResult = readiness(change, contents);
+        const treeNode = await buildNode(root, target.id).catch(() => undefined);
+        const readinessResult = readiness(change, contents, [], (treeNode?.children.length ?? 0) > 0 ? { rollup: true } : {});
         const closure = target.archived ? await readArchivedClosure(root, target.id) : undefined;
+        const closureIntegrity = await inspectClosureIntegrity(root, target.id);
         const executionDrift = inspectExecutionDrift(change);
-        const result = { change, archived: target.archived, executionDrift, ...(closure ? { closure } : {}), readiness: readinessResult };
+        const observationBasis = await detectObservationBasis(root);
+        const result = { change, archived: target.archived, executionDrift, observationBasis, closureIntegrity, ...(closure ? { closure } : {}), readiness: readinessResult };
         if (json) { printWithSync(result, target.archived ? null : await syncIfAutomatic(root, target.id), undefined, executionDriftWarnings(target.id, executionDrift)); }
         else {
           const lines: string[] = [];
@@ -1770,11 +2288,21 @@ Options:
             lines.push(kv('Capability contribution', String(closure.contribution ?? 'unknown')));
             lines.push(kv('Resulting capability revision', capabilityRecord?.resultingRevision === undefined ? '(none)' : String(capabilityRecord.resultingRevision)));
             lines.push(kv('Verification at close', String(verificationRecord?.status ?? 'unknown')));
+            const sourceRecord = closure.sourceBinding as Record<string, unknown> | undefined;
+            if (sourceRecord) {
+              const bound = sourceRecord.bound === true;
+              lines.push(kv('Source binding at close', bound ? ok('bound') : warn(`unbound${sourceRecord.acceptedArtifactBasis === true ? ' (artifact basis accepted)' : ''}`)));
+            }
             lines.push(kv('Closure manifest', `.notchlet/archive/${target.id}/closure.json`));
+          }
+          if (closureIntegrity.archived || closureIntegrity.manifestPresent) {
+            lines.push(kv('Closure integrity', closureIntegrity.valid ? ok('valid') : err(`${closureIntegrity.issues.length} issue(s)`)));
+            for (const issue of closureIntegrity.issues) lines.push(bullet(`${issue.code}: ${issue.recovery}`, '↳'));
           }
           lines.push(kv('Revision', String(change.revision ?? 0)));
           lines.push(kv('Content revision', String(change.contentRevision ?? 0)));
           lines.push(kv('Evidence policy', change.evidencePolicy ?? 'per-task'));
+          lines.push(kv('Observation basis', observationBasisLabel(observationBasis)));
           lines.push(kv('Intent', change.intent));
           lines.push(kv('Outcome', change.outcome));
           if (change.runCommand) lines.push(kv('Run command', change.runCommand));
@@ -1789,7 +2317,7 @@ Options:
           lines.push(divider());
           lines.push(section('Artifacts'));
           const artifactNames = Object.keys(change.artifacts).sort();
-          const changeDirectory = ['.notchlet', target.archived ? 'archive' : 'changes', target.id].join('/');
+          const changeDirectory = ['.notchlet', target.archived ? 'archive' : 'changes', ...target.id.split('/')].join('/');
           const closureArtifacts = closure?.artifacts as Array<{ artifact: string; path: string; role?: string; status?: string; bytes?: number }> | undefined;
           if (artifactNames.length === 0) lines.push(warn('(none)'));
           else if (closureArtifacts?.length) {
@@ -1867,8 +2395,10 @@ Options:
           const patch = itemPatchFromOptions(itemKind);
           if (Object.keys(patch).length === 0) fail('usage_error', usage, `Provide at least one editable ${itemKind} field: ${AUTHORED_OPTIONS[itemKind].join(', ')}.`, 64);
           const id = await resolveChangeRef(root, changeRef);
+          if (itemKind === 'task') await assertLeafTarget(root, id, 'edit tasks');
           const change = await mutateChange(root, id, current => updateChangeItem(current, itemKind, itemId, patch), revisionOption());
-          printWithSync(change, await syncIfAutomatic(root, id), `Updated ${itemKind} ${itemId} in ${id} (revision ${change.revision ?? 0}).`);
+          const setupHint = itemKind === 'check' ? setupAdvisory(change) : undefined;
+          printWithSync(change, await syncIfAutomatic(root, id), `Updated ${itemKind} ${itemId} in ${id} (revision ${change.revision ?? 0}).`, setupHint ? [setupHint] : []);
         } else {
           assertOptions(['--change', '--intent', '--outcome', '--capability-name', '--capability-impact', '--capability-rationale', '--evidence-policy', '--run-command', '--preview-url', '--readiness-url', '--working-directory', '--ready-timeout', '--ready-interval', '--environment', '--setup', '--teardown', '--coverage-policy', '--revision'], 'change update');
           const root = await requireWorkspace('change update');
@@ -1908,6 +2438,7 @@ Options:
         assertOptions(['--id', ...AUTHORED_OPTIONS[kind], '--revision'], `change add ${kind}`);
         const root = await requireWorkspace('change add');
         const id = await resolveChangeRef(root, changeRef);
+        if (kind === 'task') await assertLeafTarget(root, id, 'add tasks');
         const itemId = optionValue('--id');
         if (!itemId) fail('usage_error', usage, 'Provide --id for the new item.', 64);
         const required = (name: string): string => {
@@ -1915,18 +2446,38 @@ Options:
           if (!value?.trim()) fail('usage_error', usage, `Provide ${name} for this ${kind}.`, 64);
           return value;
         };
+        let promptedTaskIds: string[] = [];
+        if (kind === 'check' && !optionValues('--task').length && isTty() && !args.includes('--no-prompt')) {
+          const existing = await readChange(root, id);
+          if (existing.tasks.length) {
+            const answer = (await prompt(`Link this check to a task? [${existing.tasks.map(task => task.id).join(', ')}; Enter skips]: `)).trim();
+            if (answer) {
+              promptedTaskIds = answer.split(',').map(value => value.trim()).filter(Boolean);
+              const unknown = promptedTaskIds.filter(taskId => !existing.tasks.some(task => task.id === taskId));
+              if (unknown.length) fail('usage_error', `Unknown task ID(s): ${unknown.join(', ')}.`, 'Link only tasks that exist on this change, or press Enter to skip.', 64);
+            }
+          }
+        }
         const change = await mutateChange(root, id, current => {
           if (kind === 'requirement') return addRequirementToChange(current, { id: itemId, title: required('--title'), description: required('--description') });
           if (kind === 'check') {
             const requirementIds = optionValues('--requirement');
             const scenarioIds = optionValues('--scenario');
-            const taskIds = optionValues('--task');
+            const taskIds = optionValues('--task').length ? optionValues('--task') : promptedTaskIds;
             const checkKind = optionValue('--kind');
             if (checkKind !== undefined && !['command', 'manual', 'browser', 'http', 'ui'].includes(checkKind)) fail('usage_error', usage, 'Use --kind command, --kind http, --kind browser, --kind ui, or --kind manual.', 64);
             const settleRaw = optionValue('--settle-ms');
             const settleMs = settleRaw === undefined ? undefined : Number(settleRaw);
             if (settleMs !== undefined && (!Number.isInteger(settleMs) || settleMs < 0)) fail('usage_error', usage, 'Provide a non-negative integer --settle-ms.', 64);
             const expectedSelectors = rawOptionValues('--expected-selector');
+            const expectedVisibleSelectors = rawOptionValues('--expected-visible-selector');
+            const expectedHiddenSelectors = rawOptionValues('--expected-hidden-selector');
+            const expectedAbsentSelectors = rawOptionValues('--expected-absent-selector');
+            const expectedEnabledSelectors = rawOptionValues('--expected-enabled-selector');
+            const expectedTitle = optionValue('--expected-title');
+            const expectedScopedText = scopedTextOption();
+            const steps = uiStepsOption();
+            const captureArtifacts = capturePolicyOption();
             const expectedStatus = optionValue('--expected-status');
             if (expectedStatus !== undefined && (!Number.isInteger(Number(expectedStatus)) || Number(expectedStatus) < 100 || Number(expectedStatus) > 599)) fail('usage_error', usage, 'Provide --expected-status as an HTTP status between 100 and 599.', 64);
             const expectedJson = optionValue('--expected-json');
@@ -1956,6 +2507,14 @@ Options:
               ...(optionValue('--wait-for') === undefined ? {} : { waitFor: optionValue('--wait-for') }),
               ...(settleMs === undefined ? {} : { settleMs }),
               ...(expectedSelectors.length ? { expectedSelectors } : {}),
+              ...(expectedVisibleSelectors.length ? { expectedVisibleSelectors } : {}),
+              ...(expectedHiddenSelectors.length ? { expectedHiddenSelectors } : {}),
+              ...(expectedAbsentSelectors.length ? { expectedAbsentSelectors } : {}),
+              ...(expectedEnabledSelectors.length ? { expectedEnabledSelectors } : {}),
+              ...(expectedTitle === undefined ? {} : { expectedTitle }),
+              ...(expectedScopedText === undefined ? {} : { expectedScopedText }),
+              ...(steps === undefined ? {} : { steps }),
+              ...(captureArtifacts === undefined ? {} : { captureArtifacts }),
               ...(optionValue('--expected-text') === undefined ? {} : { expectedText: optionValue('--expected-text') }),
               ...(args.includes('--expect-no-console-errors') ? { expectedNoConsoleErrors: true } : {}),
               ...(args.includes('--full-page') ? { fullPage: true } : {}),
@@ -1968,7 +2527,8 @@ Options:
           if (kind === 'decision') return addDesignDecisionToChange(current, { id: itemId, decision: required('--decision'), rationale: required('--rationale') });
           return addTaskToChange(current, { id: itemId, title: required('--title'), status: 'pending', dependencies: optionValues('--depends-on'), requirementIds: optionValues('--requirement') });
         }, revisionOption());
-        printWithSync(change, await syncIfAutomatic(root, id), `Added ${kind} ${itemId} to ${id} (revision ${change.revision ?? 0}).`);
+        const setupHint = kind === 'check' ? setupAdvisory(change) : undefined;
+        printWithSync(change, await syncIfAutomatic(root, id), `Added ${kind} ${itemId} to ${id} (revision ${change.revision ?? 0}).`, setupHint ? [setupHint] : []);
       } else if (action === 'remove') {
         assertOptions(['--id', '--revision'], 'change remove');
         const root = await requireWorkspace('change remove');
@@ -1979,6 +2539,7 @@ Options:
         const itemId = positional[4] ?? optionValue('--id');
         if (!changeRef || !collection || !itemId) fail('usage_error', usage, 'Use `notchlet change remove <change> requirement|check|scenario|decision|task <item-id>`.', 64);
         const id = await resolveChangeRef(root, changeRef);
+        if (collection === 'tasks') await assertLeafTarget(root, id, 'remove tasks');
         const change = await removeChangeItem(root, id, collection, itemId, revisionOption());
         printWithSync(change, await syncIfAutomatic(root, id), `Removed ${kind} ${itemId} from ${id} (revision ${change.revision ?? 0}).`);
       } else if (action === 'convert') {
@@ -2012,19 +2573,93 @@ Options:
         }
         const expected = parseRevisionOption('--revision') ?? batchRevision;
         const operations = parseChangeOperations(record.operations);
+        if (operations.some(operation => 'kind' in operation && operation.kind === 'task')) await assertLeafTarget(root, id, 'edit tasks');
         const refreshExecution = operations.some(operation => operation.op === 'field' && Object.keys(operation.update).some(field => EXECUTION_FIELDS.has(field)));
         const result = await persistChangeOperations(root, id, operations, { ...(expected === undefined ? {} : { expectedRevision: expected }), refreshExecution });
-        printWithSync({ change: result.change, applied: result.applied }, await syncIfAutomatic(root, id), `Applied ${result.applied} operation(s) to ${id} (revision ${result.change.revision ?? 0}).`);
+        const setupHint = setupAdvisory(result.change);
+        printWithSync({ change: result.change, applied: result.applied }, await syncIfAutomatic(root, id), `Applied ${result.applied} operation(s) to ${id} (revision ${result.change.revision ?? 0}).`, setupHint ? [setupHint] : []);
       } else if (action === 'render') {
-        assertOptions(['--check', '--write', '--force', '--markdown'], 'change render');
+        assertOptions(['--check', '--write', '--force', '--markdown', '--tree'], 'change render');
         const root = await requireWorkspace('change render');
         const changeRef = positional[2];
         if (!changeRef) fail('usage_error', usage, 'Use `notchlet change render <change> [--check|--write] [--force]`.', 64);
         if (args.includes('--check') && args.includes('--write')) fail('usage_error', 'Choose either --check or --write for change render.', 'Use --check to report drift without writing, or --write to render artifacts.', 64);
         if (args.includes('--markdown') && !args.includes('--write')) fail('usage_error', '--markdown requires --write.', 'Add --write to declare and render optional Markdown views.', 64);
+        const tree = args.includes('--tree');
+        if (tree && !args.includes('--check') && !args.includes('--write')) fail('usage_error', '--tree requires --check or --write.', 'Use `notchlet change render <change> --tree --write` to render a whole subtree.', 64);
         const target = await resolveChangeTarget(root, changeRef);
         const id = target.id;
-        if (args.includes('--check')) {
+        if (tree) {
+          if (target.archived) fail('archived_change', `Change ${id} is archived and its subtree cannot be rendered in place.`, `Restore it with \`notchlet change restore ${id}\` first.`, 1);
+          const rootNode = await buildNode(root, id);
+          const nodes = flattenTree(rootNode);
+          if (args.includes('--check')) {
+            const entries: Array<Record<string, unknown>> = [];
+            let drifted = false;
+            for (const node of nodes) {
+              if (node.closed) { entries.push({ id: node.id, relativePath: node.relativePath, archived: true }); continue; }
+              try {
+                const result = await inspectChangeArtifacts(root, node.id);
+                const nodeDrift = result.drifted || result.executionDrift.status === 'drifted';
+                drifted ||= nodeDrift;
+                entries.push({ id: node.id, relativePath: node.relativePath, ...result });
+              } catch (error) {
+                drifted = true;
+                entries.push({ id: node.id, relativePath: node.relativePath, error: error instanceof Error ? error.message : String(error) });
+              }
+            }
+            if (json) print({ tree: entries, drifted, root: id });
+            else {
+              const lines: string[] = [section(`Artifact drift: ${id} (subtree, ${nodes.length} node${nodes.length === 1 ? '' : 's'})`)];
+              for (const node of nodes) {
+                const entry = entries.find(item => item.id === node.id)!;
+                if (entry.archived) { lines.push(kv(node.relativePath, 'archived')); continue; }
+                if (entry.error) { lines.push(kv(node.relativePath, err(String(entry.error)))); continue; }
+                const artifacts = entry.artifacts as Array<{ artifact: string; status: string; drift?: string }> ?? [];
+                const executionDrift = entry.executionDrift as { status: string } | undefined;
+                const nodeDrift = entry.drifted === true || executionDrift?.status === 'drifted';
+                const detail = artifacts.length ? artifacts.map(artifact => `${artifact.artifact}:${artifact.status}${artifact.drift ? ` (${artifact.drift})` : ''}`).join(', ') : 'no declared artifacts';
+                lines.push(kv(node.relativePath, `${nodeDrift ? err('drifted') : ok('current')} — ${detail}`));
+              }
+              lines.push(kv('Drifted', drifted ? err('yes') : ok('no')));
+              console.log(box(lines));
+            }
+            if (drifted) process.exitCode = 1;
+          } else {
+            const entries: Array<Record<string, unknown>> = [];
+            let refused = 0;
+            let failed = 0;
+            for (const node of nodes) {
+              if (node.closed) { entries.push({ id: node.id, relativePath: node.relativePath, archived: true }); continue; }
+              try {
+                const result = await writeChangeArtifacts(root, node.id, { force: args.includes('--force'), markdown: args.includes('--markdown') });
+                const sync = await syncIfAutomatic(root, node.id);
+                refused += result.refused.length;
+                entries.push({ id: node.id, relativePath: node.relativePath, written: result.written, unchanged: result.unchanged, refused: result.refused, revision: result.change.revision ?? 0, ...(sync ? { sync } : {}) });
+              } catch (error) {
+                failed++;
+                entries.push({ id: node.id, relativePath: node.relativePath, error: error instanceof Error ? error.message : String(error) });
+              }
+            }
+            if (json) print({ tree: entries, root: id });
+            else {
+              const lines: string[] = [section(`Artifacts rendered: ${id} (subtree, ${nodes.length} node${nodes.length === 1 ? '' : 's'})`)];
+              for (const node of nodes) {
+                const entry = entries.find(item => item.id === node.id)!;
+                if (entry.archived) { lines.push(kv(node.relativePath, 'archived (skipped)')); continue; }
+                if (entry.error) { lines.push(kv(node.relativePath, err(String(entry.error)))); continue; }
+                const written = (entry.written as string[] | undefined) ?? [];
+                const unchanged = (entry.unchanged as string[] | undefined) ?? [];
+                const nodeRefused = (entry.refused as Array<{ artifact: string; reason: string }> | undefined) ?? [];
+                lines.push(kv(node.relativePath, `${written.length ? `written ${written.join(', ')}` : 'written (none)'}; unchanged ${unchanged.length ? unchanged.join(', ') : '(none)'}${nodeRefused.length ? `; ${err(`refused ${nodeRefused.map(item => `${item.artifact} (${item.reason})`).join(', ')}`)}` : ''}${entry.sync ? '; synced' : ''}`));
+                const sync = entry.sync as { state?: string } | undefined;
+                if (sync?.state) lines.push(bullet(`sync: ${sync.state}`, '↳'));
+              }
+              console.log(box(lines));
+            }
+            if (refused || failed) process.exitCode = 1;
+          }
+        } else if (args.includes('--check')) {
           const result = await inspectChangeArtifacts(root, id);
           if (json) { print({ ...result, archived: target.archived }); }
           else {
@@ -2152,8 +2787,8 @@ Options:
           }
         } else fail('usage_error', usage, 'Use `notchlet change plan validate <path>`, `change plan status <change>`, or `change plan sync <change>`.', 64);
       } else if (action === 'close') {
-        assertOptions(['--preview', '--baseline-revision', '--yes', '--markdown', '--accept-plan-drift'], 'change close');
-        const root = await requireWorkspace('change close');
+        assertOptions(['--preview', '--fail-on-blockers', '--baseline-revision', '--yes', '--markdown', '--accept-plan-drift', '--accept-artifact-basis'], 'change close');
+        if (args.includes('--fail-on-blockers') && !args.includes('--preview')) fail('usage_error', '--fail-on-blockers requires --preview.', 'Run `notchlet change close <change> --preview --fail-on-blockers` to gate CI on closure blockers.', 64);        const root = await requireWorkspace('change close');
         const changeRef = positional[2] ?? (isTty() ? await prompt('Change name or ID: ') : undefined);
         if (!changeRef) fail('usage_error', usage, 'Provide a change name or ID.', 64);
         const id = await resolveChangeRef(root, changeRef);
@@ -2177,6 +2812,7 @@ Options:
               lines.push(kv('Capability baseline', 'not applicable (no-impact closure writes no baseline)'));
             }
             lines.push(kv('Verification', `${preview.verification.status} (${preview.verification.basis} basis)`));
+            lines.push(kv('Source binding', sourceBindingLabel(preview.sourceBinding)));
             if (preview.verification.missing.length) lines.push(kv('Missing checks', preview.verification.missing.join(', ')));
             if (preview.verification.failed.length) lines.push(kv('Failed checks', preview.verification.failed.join(', ')));
             if (preview.verification.stale.length) lines.push(kv('Stale checks', preview.verification.stale.join(', ')));
@@ -2197,11 +2833,16 @@ Options:
             if (presenceOnly.length) lines.push(kv('Advisory', warn(`presence-only UI check${presenceOnly.length === 1 ? '' : 's'} ${presenceOnly.map(check => check.id).join(', ')}`)));
             const setupHint = setupAdvisory(change);
             if (setupHint) lines.push(kv('Advisory', warn(setupHint.message)));
+            const taskLinks = taskLinkAdvisory(change);
+            if (taskLinks) lines.push(kv('Advisory', warn(`${taskLinks.message} ${taskLinks.recovery}`)));
+            const hiddenOnly = hiddenOnlySoleCheckAdvisory(change);
+            if (hiddenOnly) lines.push(kv('Advisory', warn(`${hiddenOnly.message} ${hiddenOnly.recovery}`)));
+            if (preview.narrative) lines.push(kv('Advisory', warn(`${preview.narrative.message} ${preview.narrative.recovery}`)));
             const history = await readAttemptHistory(root, id);
             const unstable = history.checks.filter(check => check.attempts > 1 && check.signatures.some(signature => signature.count > 1));
             if (unstable.length) lines.push(kv('Attempt history', warn(`${unstable.map(check => `${check.id} failed the same way up to ${Math.max(...check.signatures.map(signature => signature.count))}×`).join('; ')}. Run \`notchlet status ${id} --history\` for details.`)));
             lines.push(bullet('Readiness is planning validation; verification is check evidence; local closure does not imply remote delivery.'));
-            if (preview.verification.basis === 'artifact') lines.push(warn('No Git repository was observed; freshness was evaluated from change artifacts only.'));
+            if (!preview.sourceBinding.bound) lines.push(warn('Source is unbound for current evidence: closure records an artifact-only decision only when you pass --accept-artifact-basis. Re-record checks after binding source, or acknowledge the basis explicitly.'));
             if (preview.blockers?.length) {
               lines.push(section('Blockers'));
               for (const b of preview.blockers) lines.push(bullet(`${b.code}: ${b.message}\n  Recovery: ${b.recovery}`));
@@ -2209,6 +2850,7 @@ Options:
             console.log(box(lines));
             console.log(warn('No files were changed.'));
           }
+          if (args.includes('--fail-on-blockers') && preview.blockers?.length) process.exitCode = 1;
         } else {
           const yes = args.includes('--yes');
           if (!yes && isTty()) {
@@ -2216,7 +2858,7 @@ Options:
             if (!confirmed) { console.log(warn('Cancelled.')); return; }
           }
           const revision = parseRevisionOption('--baseline-revision');
-          let options: Parameters<typeof closeChange>[2] = { renderMarkdown: args.includes('--markdown'), acceptPlanDrift: args.includes('--accept-plan-drift') };
+          let options: Parameters<typeof closeChange>[2] = { renderMarkdown: args.includes('--markdown'), acceptPlanDrift: args.includes('--accept-plan-drift'), acceptArtifactBasis: args.includes('--accept-artifact-basis') };
           if (preview.contribution === 'none') {
             if (revision !== undefined) fail('usage_error', usage, 'A no-impact change closes without --baseline-revision because no capability baseline is written.', 64);
           } else {
@@ -2224,9 +2866,50 @@ Options:
             options = { ...options, expectedBaselineRevision: revision };
           }
           const result = await closeChange(root, id, options);
-          printWithSync(result, await syncIfAutomatic(root, id), `Closed and archived ${id} locally. Local closure only; remote delivery is unchanged.${preview.contribution === 'none' ? ' No capability baseline was written.' : ` Capability baseline updated to revision ${result.baselineRevision}.`} Closure manifest: ${result.manifestPath}${args.includes('--markdown') ? ' (with closure.md)' : ''}.${result.contractSha256 ? ` Contract SHA-256: ${result.contractSha256}.` : ''}${result.artifactRefresh === 'generated-state' ? ' Lifecycle-only artifact state was refreshed automatically.' : ''} Review with \`notchlet change export ${id} --format json\`.`);
+          const sourceWarning = preview.sourceBinding.bound ? '' : ' Source was unbound for current evidence; the artifact-only basis was recorded because --accept-artifact-basis was passed.';
+          printWithSync(result, await syncIfAutomatic(root, id), `Closed and archived ${id} locally. Local closure only; remote delivery is unchanged.${preview.contribution === 'none' ? ' No capability baseline was written.' : ` Capability baseline updated to revision ${result.baselineRevision}.`}${sourceWarning} Closure manifest: ${result.manifestPath}${args.includes('--markdown') ? ' (with closure.md)' : ''}.${result.contractSha256 ? ` Contract SHA-256: ${result.contractSha256}.` : ''}${result.artifactRefresh === 'generated-state' ? ' Lifecycle-only artifact state was refreshed automatically.' : ''} Review with \`notchlet change export ${id} --format json\`.`);
         }
       } else fail('usage_error', usage, 'Run `notchlet --help` for command syntax.', 64);
+    } else if (command === 'closure') {
+      const action = positional[1];
+      if (args.includes('--help') || args.includes('-h')) {
+        showCommandHelp('closure', `notchlet closure verify <change> [--tree]
+
+  Verify archived closure manifests and parent-child closure hashes.
+
+Options:
+  <change>     Change name, ID, or relative path (required)
+  --tree       Verify the selected subtree, deepest nodes included
+  --workspace <root>   Set workspace root
+  --json       Machine-readable JSON output`);
+      }
+      if (action !== 'verify') fail('usage_error', usage, 'Use `notchlet closure verify <change> [--tree]`.', 64);
+      assertOptions(['--tree'], 'closure verify');
+      const root = await requireWorkspace('closure verify');
+      const changeRef = positional[2];
+      if (!changeRef) fail('usage_error', usage, 'Use `notchlet closure verify <change> [--tree]`.', 64);
+      const target = await resolveChangeTarget(root, changeRef);
+      const treeFlag = args.includes('--tree');
+      const nodes = treeFlag ? flattenTree(await buildNode(root, target.id)) : [await buildNode(root, target.id)];
+      const reports: ClosureIntegrityReport[] = [];
+      for (const node of nodes) reports.push(await inspectClosureIntegrity(root, node.relativePath));
+      const issues = reports.flatMap(report => report.issues);
+      const shownReports = treeFlag ? reports.filter(report => report.archived || report.manifestPresent || report.issues.length) : reports;
+      const data = { workspace: root, relativePath: target.id, tree: treeFlag, valid: issues.length === 0, reports: shownReports, issues };
+      if (json) {
+        console.log(JSON.stringify(envelope(issues.length === 0, data, issues.length ? { code: 'closure_integrity_failed', message: `${issues.length} closure integrity issue(s).`, recovery: 'Restore and re-close the affected ancestor chain, then rerun `notchlet closure verify`.' } : null, [])));
+      } else {
+        const lines: string[] = [section(`Closure verify: ${target.id}${treeFlag ? ' (tree)' : ''}`)];
+        if (!shownReports.length) lines.push(warn('No archived closure manifests found in this subtree.'));
+        for (const report of shownReports) {
+          if (lines.length > 1) lines.push(divider());
+          lines.push(...closureIntegrityLines(report));
+        }
+        lines.push(divider());
+        lines.push(kv('Result', issues.length ? err(`${issues.length} issue(s)`) : ok('valid')));
+        console.log(box(lines));
+      }
+      if (issues.length) process.exitCode = 1;
     } else if (command === 'schema') {
       if (args.includes('--help') || args.includes('-h')) {
         showCommandHelp('schema', `notchlet schema [name] [--dir]
@@ -2251,7 +2934,7 @@ Options:
       }
     } else if (command === 'verify') {
       if (args.includes('--help') || args.includes('-h')) {
-        showCommandHelp('verify', `notchlet verify <change-name|id> [--check <id,...>] [--record] [--requirement <id,...>] [--scenario <id,...>] [--task <id,...>]
+        showCommandHelp('verify', `notchlet verify <change-name|id> [--tree] [--check <id,...>] [--record] [--requirement <id,...>] [--scenario <id,...>] [--task <id,...>]
                          [--timeout <ms>] [--working-directory <dir>] [--ready-timeout <ms>] [--ready-interval <ms>]
                          [--serve] [--serve-command <cmd>] [--keep-running] [--reuse-serve] [--ui-capture never|on-failure|always]
                          [--environment KEY=value] [--setup <cmd>] [--save-setup] [--teardown <cmd>] [--repeat <n>]
@@ -2261,13 +2944,16 @@ Options:
   Run command checks and HTTP probes declared on a change. Manual checks are reported as skipped and require recorded evidence.
   HTTP checks assert status plus optional body, JSON subset/containment/path, and header expectations. Legacy browser checks run as HTTP probes.
   UI checks can assert visibility, enabled state, title, scoped text, and declarative interaction steps; failed captures are archived by default.
+  The output names the observation basis: git means source edits invalidate evidence; artifact means only change artifacts are observed.
   --serve starts the declared run command (or --serve-command), waits for readiness, and stops it after checks unless --keep-running is set.
   An existing listener fails the run unless --reuse-serve is passed; setup is skipped when an external server is reused.
   --repeat reruns the batch (including setup) and reports state_not_idempotent when check outcomes differ, state_drift_under_stable_failure when failing observations change, or readiness_drift_under_stable_failure when startup observations change.
   In JSON, \`ok\` describes command execution; use \`data.result\` or \`data.verification.outcome\` for the verification result. \`repeat.hints\` and \`repeat.setupRan\` summarize remediation.
+  --tree verifies every open node deepest-first, then by path; nodes share workspace and external app state rather than running isolated. It skips archived nodes, bare rollups, and nodes with only manual checks; manual checks still need separately recorded evidence. Runtime flags such as --record, --serve, --timeout, --environment, --repeat, --ui-capture, and --full-page apply to every node. It exits 1 when any node fails and 2 when no open node has a runnable check; an archived-only subtree returns no_open_nodes with a restore recovery. Per-check selection and assertion overrides, setup/serve overrides, and --capture-url/--attach are rejected with --tree; verify a single node for those. The output names the run order, aggregate observation basis, and child advisories/drift. Failed nodes also name their failed check IDs, failed assertions, failure phase, evidence log path, and single-node recovery.
 
 Options:
   <change>            Change name or ID (required)
+  --tree              Verify the open subtree bottom-up
   --check <id,...>    Only run the selected check IDs
   --record            Record the result as evidence linked to the executed checks
   --requirement <id,...>  With --record, also link these requirements
@@ -2298,6 +2984,71 @@ Options:
   --attach <path>     With --record, copy a screenshot/DOM/text/JSON file into the change evidence (repeatable)
   --workspace <root>  Set workspace root
   --json              Machine-readable JSON output`);
+      }
+      if (args.includes('--tree')) {
+        const root = await requireWorkspace('verify');
+        const changeRef = positional[1] ?? optionValue('--change');
+        if (!changeRef) fail('usage_error', usage, 'Provide a change name or ID for verify.', 64);
+        const treeUnsupported = ['--check', '--requirement', '--scenario', '--task', '--attach', '--capture-url', '--keep-running', '--reuse-serve', '--serve-command', '--setup', '--save-setup', '--teardown', '--check-setup-idempotence', '--setup-state', '--wait-for', '--expected-status', '--expected-body-contains', '--expected-json', '--expected-json-contains', '--expected-json-at', '--expected-header', '--expected-selector', '--expected-visible-selector', '--expected-hidden-selector', '--expected-absent-selector', '--expected-enabled-selector', '--expected-text', '--expected-title', '--expected-scoped-text', '--step', '--command', '--url', '--kind'];
+        const present = treeUnsupported.filter(name => args.includes(name) || args.some(arg => arg.startsWith(`${name}=`)));
+        if (present.length) fail('usage_error', `${present.join(', ')} cannot be combined with --tree.`, 'Tree verification runs each open node with its own authored checks. Verify a single node when you need per-check selection or assertions, setup, serve, or capture overrides.', 64);
+        const passthrough: string[] = [];
+        for (let index = 0; index < args.length; index++) {
+          const arg = args[index];
+          if (arg === '--tree' || arg === '--json' || arg === changeRef) continue;
+          if (arg === '--workspace' || arg === '--root' || arg === '--change') { index++; continue; }
+          if (arg.startsWith('--workspace=') || arg.startsWith('--root=') || arg.startsWith('--change=')) continue;
+          passthrough.push(arg);
+        }
+        const { verifyTree } = await import('./verify-tree.js');
+        const report = await verifyTree({ root, reference: changeRef, passthrough });
+        if (!report.targets && report.openNodes === 0) {
+          const restoreTarget = report.restoreTarget ?? changeRef;
+          fail('no_open_nodes', `No open node remains in ${changeRef}; all ${report.archivedNodes} node${report.archivedNodes === 1 ? '' : 's'} in the subtree are archived.`, `Restore the archived subtree with \`notchlet change restore ${restoreTarget}\`, then rerun \`notchlet verify ${changeRef} --tree\`. Restoring an archived ancestor moves the whole subtree back to active work.`, 2);
+        }
+        if (!report.targets) fail('no_check_commands', `No open node in ${changeRef} declares a command, HTTP, or UI check.`, 'Add a runnable check to a leaf, or verify a single node with `notchlet verify <change>`.', 2);
+        const data = {
+          result: report.outcome,
+          tree: report.nodes,
+          skipped: report.skippedNodes,
+          order: report.order,
+          observationBasis: report.observationBasis,
+          openNodes: report.openNodes,
+          archivedNodes: report.archivedNodes,
+          totals: { nodes: report.targets, passed: report.passed, failed: report.failed, skipped: report.skippedCount },
+        };
+        if (json) print(data);
+        else {
+          const lines: string[] = [];
+          lines.push(section(`Verification tree: ${changeRef}`));
+          lines.push(kv('Outcome', report.outcome === 'passed' ? ok('passed') : err('failed')));
+          lines.push(kv('Nodes', `${report.passed} passed, ${report.failed} failed, ${report.skippedCount} skipped; verified bottom-up`));
+          lines.push(kv('Run order', report.order.join(' -> ') || 'none'));
+          lines.push(kv('Observation basis', observationBasisLabel(report.observationBasis)));
+          for (const node of report.nodes) {
+            const status = node.outcome === 'passed' ? ok('passed') : err('failed');
+            lines.push(bullet(`${node.relativePath} [${status}]: ${node.passed} passed, ${node.failed} failed, ${node.skipped} skipped${node.evidenceId ? `; evidence ${node.evidenceId}` : ''}${node.observationBasis ? `; basis ${node.observationBasis}` : ''}${node.error ? ` — ${node.error}` : ''}`));
+            for (const check of node.failedChecks ?? []) {
+              lines.push(bullet(`${node.relativePath}: failed check ${check.id} [${check.kind}]${check.detail ? ` (${check.detail})` : ''}`, '↳'));
+              for (const assertion of check.assertions) {
+                lines.push(bullet(`assert ${assertion.kind}${assertion.path ? ` ${assertion.path}` : ''}: expected ${assertion.expected}, observed ${assertion.observed}`, '↳'));
+              }
+            }
+            if (node.failurePhase) lines.push(bullet(`${node.relativePath}: failure phase ${node.failurePhase}`, '↳'));
+            if (node.logPath) lines.push(bullet(`${node.relativePath}: log ${node.logPath}`, '↳'));
+            if (node.recovery) lines.push(bullet(`${node.relativePath}: recovery ${node.recovery}`, '↳'));
+            for (const advisory of node.advisories ?? []) lines.push(bullet(`${node.relativePath}: ${advisory}`, '↳'));
+            if (node.artifactDrift) lines.push(bullet(`${node.relativePath}: generated artifacts drifted${node.renderRecovery ? `; ${node.renderRecovery}` : ''}`, '↳'));
+            else if (node.renderRecovery) lines.push(bullet(`${node.relativePath}: ${node.renderRecovery}`, '↳'));
+            if (node.executionDrift) lines.push(bullet(`${node.relativePath}: execution metadata ${node.executionDrift}`, '↳'));
+          }
+          for (const node of report.skippedNodes) lines.push(bullet(`${node.relativePath} [skipped]: ${node.reason}`, '↳'));
+          if (report.skippedCount) lines.push(bullet('Archived nodes, bare rollups, nodes with no runnable checks, and nodes with only manual checks are not verified; manual checks still need separately recorded evidence.'));
+          lines.push(bullet('Tree runs share the workspace and external app state and execute deepest-first, then by path. Use per-node setup/teardown or separate data directories for stateful checks.'));
+          console.log(box(lines));
+        }
+        if (report.outcome === 'failed') process.exitCode = 1;
+        return;
       }
       const root = await requireWorkspace('verify');
       const changeRef = positional[1] ?? optionValue('--change');
@@ -2379,6 +3130,7 @@ Options:
       };
       const { runChecks, persistVerificationLog, summarizeVerification, describeReadinessObservation } = await import('./verify.js');
       const result = await runChecks(root, change, {
+        changeRef: id,
         checkIds,
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         ...(readyTimeoutMs === undefined ? {} : { readyTimeoutMs }),
@@ -2400,6 +3152,7 @@ Options:
           fullPage,
         },
       });
+      const observationBasis = await detectObservationBasis(root);
       if (result.runnable === 0 && result.setupPreflight?.status !== 'failed' && result.serve?.ready !== false) {
         const phase = result.setup?.status === 'failed' ? ' The setup command failed.' : '';
         fail('no_check_commands', `No runnable command or HTTP checks were found.${phase}`, `Add a command or HTTP URL with \`notchlet change add ${id} check --id <id> --description <text> --command <cmd>\` or \`--kind http --url <http(s) URL>\`. Manual checks require separately recorded evidence.`, 2);
@@ -2439,6 +3192,8 @@ Options:
       const failedCheckIds = result.results.filter(check => check.status === 'failed').map(check => check.id);
       const presenceOnly = presenceOnlyUiChecks(change);
       const setupHint = setupAdvisory(change);
+      const taskLinks = taskLinkAdvisory(change);
+      const hiddenOnly = hiddenOnlySoleCheckAdvisory(change);
       const attemptHistory = result.outcome === 'failed' ? await readAttemptHistory(root, id) : undefined;
       const repeatedFailures = (attemptHistory?.checks ?? []).flatMap(check => {
         if (!failedCheckIds.includes(check.id)) return [];
@@ -2451,18 +3206,21 @@ Options:
       }
       const recovery = failedCheckIds.length ? verificationRecovery(id, failedCheckIds) : result.setupPreflight?.status === 'failed' ? result.setupPreflight.recovery : undefined;
       const artifactState = await inspectChangeArtifacts(root, id).catch(() => undefined);
-      const renderRecovery = artifactState?.drifted ? `notchlet change render ${id} --write${artifactState.artifacts.some(artifact => artifact.status === 'unmarked' || artifact.drift === 'authored') ? ' --force' : ''}` : undefined;
+      const renderRecovery = artifactState?.drifted ? `notchlet change render ${id} --write${artifactState.artifacts.some(artifact => artifact.status === 'unmarked') ? ' --force' : ''}` : undefined;
       const advisories = {
         ...(presenceOnly.length ? { presenceOnly: presenceOnly.map(check => ({ id: check.id, reason: check.reason })) } : {}),
         ...(setupHint ? { setup: setupHint } : {}),
+        ...(taskLinks ? { taskLinks } : {}),
+        ...(hiddenOnly ? { hiddenOnly } : {}),
       };
-      const data = { result: result.outcome, verification: result, ...(Object.keys(advisories).length ? { advisories } : {}), ...(attemptHistory && failedCheckIds.length ? { history: { logs: attemptHistory.logs, checks: attemptHistory.checks.filter(check => failedCheckIds.includes(check.id)), readinessFailures: attemptHistory.readinessFailures } } : {}), ...(repeatedFailures.length ? { repeatedFailures } : {}), ...(evidence ? { evidence } : {}), ...(log !== undefined && evidence === undefined ? { diagnosticLog: log } : {}), ...(captured ? { capture: captured.capture } : {}), ...(recovery ? { recovery } : {}), ...(artifactState ? { artifacts: artifactState.artifacts, drifted: artifactState.drifted, executionDrift: artifactState.executionDrift } : {}), ...(renderRecovery ? { renderRecovery } : {}) };
+      const data = { result: result.outcome, verification: result, observationBasis, ...(Object.keys(advisories).length ? { advisories } : {}), ...(attemptHistory && failedCheckIds.length ? { history: { logs: attemptHistory.logs, checks: attemptHistory.checks.filter(check => failedCheckIds.includes(check.id)), readinessFailures: attemptHistory.readinessFailures } } : {}), ...(repeatedFailures.length ? { repeatedFailures } : {}), ...(evidence ? { evidence } : {}), ...(log !== undefined && evidence === undefined ? { diagnosticLog: log } : {}), ...(captured ? { capture: captured.capture } : {}), ...(recovery ? { recovery } : {}), ...(artifactState ? { artifacts: artifactState.artifacts, drifted: artifactState.drifted, executionDrift: artifactState.executionDrift } : {}), ...(renderRecovery ? { renderRecovery } : {}) };
       if (json) { print(data); }
       else {
         const lines: string[] = [];
         lines.push(section(`Verification: ${change.name} (${id})`));
         lines.push(kv('Outcome', result.outcome === 'passed' ? ok('passed') : result.outcome === 'failed' ? err('failed') : warn('informational')));
         lines.push(kv('Checks', `${result.passed} passed, ${result.failed} failed, ${result.skipped} skipped`));
+        lines.push(kv('Observation basis', observationBasisLabel(observationBasis)));
         if (result.failurePhase) lines.push(kv('Failure phase', result.failurePhase));
         if (result.blocked) lines.push(kv('Blocked checks', String(result.blocked)));
         if (result.repeat) {
@@ -2529,6 +3287,8 @@ Options:
         }
         if (presenceOnly.length) lines.push(kv('Advisory', warn(`presence-only UI check${presenceOnly.length === 1 ? '' : 's'} ${presenceOnly.map(check => check.id).join(', ')}; add expectedVisibleSelectors, expectedText, or waitForVisible/waitForText to prove state.`)));
         if (setupHint) lines.push(kv('Advisory', warn(setupHint.message)));
+        if (taskLinks) lines.push(kv('Advisory', warn(`${taskLinks.message} ${taskLinks.recovery}`)));
+        if (hiddenOnly) lines.push(kv('Advisory', warn(`${hiddenOnly.message} ${hiddenOnly.recovery}`)));
         for (const repeated of repeatedFailures) lines.push(kv('Failure repeat', warn(repeated)));
         if (result.teardown) lines.push(kv('Teardown', `${result.teardown.status} (exit ${result.teardown.exitCode ?? 'none'}, ${result.teardown.durationMs}ms)`));
         if (evidence) {
@@ -2575,9 +3335,10 @@ Options:
         const changeRef = optionValue('--change') ?? (isTty() ? await prompt('Change name or ID: ') : undefined);
         if (!changeRef) fail('usage_error', usage, 'Provide --change for `task complete --all`.', 64);
         const id = await resolveChangeRef(root, changeRef);
+        await assertLeafTarget(root, id, 'transition tasks');
         const localChange = await readChange(root, id);
         const revision = parseRevisionOption('--revision') ?? (localChange.revision ?? 0);
-        const result = await completeTasks(path.join(root, '.notchlet', 'changes', id, 'tasks.json'), revision, { requireEvidence: args.includes('--require-evidence') });
+        const result = await completeTasks(path.join(root, '.notchlet', 'changes', ...id.split('/'), 'tasks.json'), revision, { requireEvidence: args.includes('--require-evidence') });
         printWithSync(result.change, await syncIfAutomatic(root, id), result.completed.length
           ? `Completed ${result.completed.length} task(s) in ${id} (${result.completed.join(', ')}; revision ${result.change.revision ?? 0}).`
           : `No incomplete tasks remained in ${id}.`, result.warnings);
@@ -2599,13 +3360,14 @@ Options:
       }
       if (!id || !taskId || !['pending', 'in_progress', 'completed'].includes(status ?? '')) fail('usage_error', usage, 'Use task start|complete <task-name|id> --change <change-name|id>, or task update <change-name|id> <task-name|id> <status> [revision].', 64);
       if (revisionText !== undefined && !Number.isInteger(Number(revisionText))) fail('usage_error', usage, 'Provide an integer --revision.', 64);
-      const changeMatches = await listChanges(root);
+      const changeMatches = await listChanges(root) as ChangeListItem[];
       const selectedChange = await pickNamedValue(id, changeMatches, {
         kind: 'Change', promptText: 'Select change',
-        label: item => `${item.name} (${item.id})`, keys: item => [item.id, item.name],
+        label: item => `${item.name} (${item.relativePath ?? item.id})`, keys: item => [item.relativePath ?? item.id, item.id, item.name],
       });
       if (!selectedChange) fail('change_not_found', `No change matched "${id}".`, 'Run `notchlet change list` and use a change name or ID.', 2);
-      id = selectedChange.id;
+      id = selectedChange.relativePath ?? selectedChange.id;
+      await assertLeafTarget(root, id, 'transition tasks');
       const localChange = await readChange(root, id);
       const selectedTask = await pickNamedValue(taskId, localChange.tasks, {
         kind: 'Task', promptText: 'Select task',
@@ -2615,7 +3377,7 @@ Options:
       if (!selectedTask) fail('task_not_found', `No task matched "${taskId}" in change "${localChange.name}".`, 'Use a task name or ID from `notchlet change show`.', 2);
       taskId = selectedTask.id;
       const revision = revisionText === undefined ? (localChange.revision ?? 0) : Number(revisionText);
-      const transitioned = await transitionTask(path.join(root, '.notchlet', 'changes', id, 'tasks.json'), taskId, status as TaskStatus, revision, { force: args.includes('--force'), requireEvidence: args.includes('--require-evidence') });
+      const transitioned = await transitionTask(path.join(root, '.notchlet', 'changes', ...id.split('/'), 'tasks.json'), taskId, status as TaskStatus, revision, { force: args.includes('--force'), requireEvidence: args.includes('--require-evidence') });
       const { warnings = [], ...change } = transitioned;
       printWithSync(change, await syncIfAutomatic(root, id), `Task ${taskId} marked ${status} in change ${id} (revision ${change.revision ?? 0}).`, warnings);
       }
@@ -2627,7 +3389,9 @@ Options:
   Show workspace status, or status of a specific change.
 
 Options:
-  [change-name|id]  Change name or ID (optional; lists all changes if omitted)
+  [change-name|id]  Change name, ID, or relative path (optional; lists all changes if omitted)
+  --tree              Show the backlog hierarchy (all changes or the selected subtree)
+  --depth <n>         Limit tree output to n levels
   --history            Include derived verification attempt history and repeated failures
   --workspace <root>   Set workspace root
   --json               Machine-readable JSON output`
@@ -2660,7 +3424,12 @@ Options:
         if (!changeRef) {
           if (command !== 'status') fail('usage_error', usage, `Provide a change name or ID for ${command}.`, 64);
           const changes = await listChanges(root);
-          if (json) { print({ protocolVersion: 1, coreVersion: CORE_VERSION, workspace: root, changes }); }
+          const tree = args.includes('--tree') ? await buildChangeTree(root) : undefined;
+          if (tree) tree.warnings.push(...await closureIntegrityWarnings(root, tree.nodes));
+          if (json) { print({ protocolVersion: 1, coreVersion: CORE_VERSION, workspace: root, changes, ...(tree === undefined ? {} : { tree: treeJson(tree), counts: tree.counts }) }); }
+          else if (tree) {
+            console.log(formatChangeTree(tree, { showWarnings: true }));
+          }
           else {
             console.log(section(`Changes in ${root}`));
             if (changes.length === 0) { console.log(warn('No changes found.')); }
@@ -2674,6 +3443,9 @@ Options:
           if (positional.length !== 2 && !(isTty() && positional.length === 1)) fail('usage_error', usage, 'Provide exactly one change name or ID.', 64);
           const target = await resolveChangeTarget(root, changeRef);
           const id = target.id;
+          const nodeView = command === 'status' || command === 'validate' ? await buildNode(root, id).catch(() => undefined) : undefined;
+          const treeView = command === 'status' && args.includes('--tree') ? nodeView : undefined;
+          const rollup = (nodeView?.children.length ?? 0) > 0;
           const change = await profileAsync('changeReadAndParse', () => target.archived ? readArchivedChange(root, id) : readChange(root, id));
           const executionDrift = inspectExecutionDrift(change);
           const automaticSync = target.archived ? null : await profileAsync('automaticSyncModeCheck', () => syncIfAutomatic(root, id));
@@ -2684,13 +3456,16 @@ Options:
             const attemptHistory = args.includes('--history') ? await readAttemptHistory(root, id) : undefined;
             const closurePreview = target.archived ? undefined : await previewCapabilityClose(root, id, contents).catch(() => undefined);
             const archivedClosure = target.archived ? await readArchivedClosure(root, id) : undefined;
+            const closureIntegrity = target.archived ? await inspectClosureIntegrity(root, id) : undefined;
+            const closureBlockers = integrityBlockers(closureIntegrity);
             const closureInput = closurePreview
               ? { ready: closurePreview.localClosure.ready, blockers: closurePreview.blockers.map(blocker => ({ code: blocker.code, message: blocker.message, recovery: blocker.recovery })) }
-              : archivedClosure ? { ready: true, blockers: [] } : undefined;
+              : target.archived ? { ready: closureIntegrity?.valid ?? true, blockers: closureBlockers } : undefined;
+            const treeIntegrityWarnings = treeView ? await closureIntegrityWarnings(root, flattenTree(treeView)) : [];
             const deliveryStatus = closurePreview?.remoteDelivery.status
               ?? (archivedClosure?.remoteDelivery as { status?: 'not_configured' | 'unknown' | 'not_delivered' | 'delivered' } | undefined)?.status
               ?? 'unknown';
-            const state = profileSync('evaluateState', () => evaluateState(change, { ...facets, coverageEvidence: coverageEvidenceFrom(facets), remoteDelivery: { status: deliveryStatus } }, contents, closureInput));
+            const state = profileSync('evaluateState', () => evaluateState(change, { ...facets, coverageEvidence: coverageEvidenceFrom(facets), remoteDelivery: { status: deliveryStatus } }, contents, closureInput, { rollup, archived: target.archived }));
             const derivedState = profileSync('deriveState', () => deriveStatus(state));
             const readinessState = profileSync('readinessProjection', () => ({ ready: state.planning.status === 'ready', blockers: state.planning.blockers.map(({ source: _source, ...issue }) => issue) }));
             const recoverable = [...state.verification.missing, ...state.verification.failed, ...state.verification.stale, ...state.verification.unknown];
@@ -2698,7 +3473,8 @@ Options:
             const pendingTaskEvidence = change.evidencePolicy === 'end-of-change'
               ? (await Promise.all(change.tasks.filter(task => task.status === 'completed').map(task => taskEvidenceStatus(root, change, task.id)))).filter(task => task.status !== 'current')
               : [];
-            if (json) { printWithSync({ protocolVersion: 1, coreVersion: CORE_VERSION, change: change.id, revision: change.revision ?? 0, contentRevision: change.contentRevision ?? 0, archived: target.archived, execution: executionMetadata(change), executionDrift, state: derivedState, facets: state, readiness: readinessState, ...(closurePreview ? { closure: closurePreview } : archivedClosure ? { closure: archivedClosure } : {}), ...(planInspection === undefined ? {} : { plan: planInspection, planDrift: planInspection.drift }), ...(attemptHistory === undefined ? {} : { history: attemptHistory }), pendingTaskEvidence, ...(recovery ? { recovery } : {}) }, automaticSync, `${change.name}: ${derivedState}\nCore engine: ${CORE_VERSION}\nEligible tasks: ${state.eligibleTasks.join(', ') || 'none'}\nBlockers: ${state.blockers.length}`, executionDriftWarnings(id, executionDrift)); }
+            const sourceBinding = summarizeSourceBinding(facets);
+            if (json) { printWithSync({ protocolVersion: 1, coreVersion: CORE_VERSION, change: change.id, revision: change.revision ?? 0, contentRevision: change.contentRevision ?? 0, archived: target.archived, execution: executionMetadata(change), executionDrift, state: derivedState, facets: state, sourceBinding, readiness: readinessState, ...(treeView ? { tree: { counts: treeCounts(flattenTree(treeView)), warnings: treeIntegrityWarnings, roots: [treeNodeJson(treeView)] } } : {}), ...(closurePreview ? { closure: closurePreview } : archivedClosure ? { closure: archivedClosure } : {}), ...(closureIntegrity ? { closureIntegrity } : {}), ...(planInspection === undefined ? {} : { plan: planInspection, planDrift: planInspection.drift }), ...(attemptHistory === undefined ? {} : { history: attemptHistory }), pendingTaskEvidence, ...(recovery ? { recovery } : {}) }, automaticSync, `${change.name}: ${derivedState}\nCore engine: ${CORE_VERSION}\nEligible tasks: ${state.eligibleTasks.join(', ') || 'none'}\nBlockers: ${state.blockers.length}`, executionDriftWarnings(id, executionDrift)); }
             else {
               const lines: string[] = [];
               lines.push(section(`Status: ${change.name} (${id})`));
@@ -2711,14 +3487,17 @@ Options:
               lines.push(kv('Tasks', `${state.execution.completed}/${state.execution.total} completed${state.execution.inProgress ? `, ${state.execution.inProgress} in progress` : ''}`));
               const bases = [...new Set(facets.checks.map(facet => facet.freshness?.basis).filter((basis): basis is 'git' | 'artifact' => Boolean(basis)))];
               const observationBasis = bases.length === 0 ? 'none' : bases.length === 1 ? bases[0] : 'mixed';
+              const observationLabel = observationBasisLabel(observationBasis);
               lines.push(kv('Planning readiness', state.planning.status));
               lines.push(kv('Verification', state.verification.status));
-              lines.push(kv('Observation basis', observationBasis));
+              lines.push(kv('Observation basis', observationLabel));
+              lines.push(kv('Source binding', sourceBindingLabel(sourceBinding)));
               lines.push(kv('Evidence policy', change.evidencePolicy ?? 'per-task'));
               lines.push(kv('Coverage', `${state.coverage.policy}: ${state.coverage.requirements.covered}/${state.coverage.requirements.total} requirements, ${state.coverage.scenarios.covered}/${state.coverage.scenarios.total} scenarios${state.coverage.complete ? '' : warn(' (incomplete)')}${state.coverage.unlinkedChecks.length ? `; unlinked checks ${state.coverage.unlinkedChecks.join(', ')}` : ''}`));
               lines.push(kv('Execution closure', state.localClosure.status));
               if (executionDrift.status === 'drifted') lines.push(kv('Execution metadata', err(`drifted since recorded — ${executionDrift.recovery}`)));
               lines.push(kv('Close readiness', !state.closure.evaluated ? warn('not evaluated') : state.closure.ready ? ok('ready') : err(`${state.closure.blockerCount} blocker(s)`)));
+              if (closureIntegrity) lines.push(kv('Closure integrity', closureIntegrity.valid ? ok(`valid (${closureIntegrity.checkedChildren} child closure(s) checked)`) : err(`${closureIntegrity.issues.length} issue(s)`)));
               lines.push(kv('Remote delivery', state.remoteDelivery.status));
               if (planInspection && planInspection.drift.status !== 'unlinked') {
                 const label = planInspection.drift.status === 'none' ? ok('current') : planInspection.drift.status === 'missing' ? warn('missing') : err('drifted');
@@ -2766,6 +3545,7 @@ Options:
                 }
               }
               console.log(box(lines));
+              if (treeView) console.log(formatSubtree(treeView, { showWarnings: true, warnings: treeIntegrityWarnings }));
             }
             if (profiling) process.stderr.write(`NOTCHLET_PROFILE ${JSON.stringify(profileTimings)}\n`);
           }
@@ -2789,10 +3569,17 @@ Options:
               manifestPath: `.notchlet/archive/${id}/closure.json`,
             } : undefined;
             const text = instructions(change, action as WorkflowAction, { artifacts: artifactState.artifacts, verification: facets, ...(closure ? { closure } : {}), ...(archived ? { archived } : {}) });
-            printWithSync({ protocolVersion: 1, coreVersion: CORE_VERSION, action, archived: target.archived, instructions: text }, automaticSync, `Core engine: ${CORE_VERSION}\n${text}`);
+            const treeView = await buildNode(root, id).catch(() => undefined);
+            const treeText = treeView?.children.length
+              ? `\n\nBacklog tree:\n${formatTree(treeView, { depth: 1 })}\nNext eligible: ${nextEligibleLeaf(treeView)?.relativePath ?? 'none'}`
+              : '';
+            printWithSync({ protocolVersion: 1, coreVersion: CORE_VERSION, action, archived: target.archived, instructions: text, ...(treeView?.children.length ? { tree: { counts: treeCounts(flattenTree(treeView)), roots: [treeNodeJson(treeView)] } } : {}) }, automaticSync, `Core engine: ${CORE_VERSION}\n${text}${treeText}`);
           }
           else {
-            const result = readiness(change, contents);
+            const baseReadiness = readiness(change, contents, [], rollup ? { rollup: true } : {});
+            const closureIntegrity = target.archived ? await inspectClosureIntegrity(root, id) : undefined;
+            const integrityIssues = integrityBlockers(closureIntegrity);
+            const result = integrityIssues.length ? { ready: false, blockers: [...baseReadiness.blockers, ...integrityIssues] } : baseReadiness;
             const locationIssues = target.archived ? [] : await diagnoseArtifactLocations(root, id, change);
             const presenceOnly = presenceOnlyUiChecks(change);
             const setupHint = setupAdvisory(change);
@@ -2803,12 +3590,13 @@ Options:
               ...(planInspection?.drift.status === 'drifted' || planInspection?.drift.status === 'missing' ? [{ code: 'plan_drift', message: `Source plan is ${planInspection.drift.status}: ${planInspection.drift.reason ?? planInspection.drift.path ?? 'unknown'}` }] : []),
               ...(planInspection?.validation.status === 'invalid' ? [{ code: 'plan_invalid', message: `Source plan no longer validates: ${planInspection.validation.error ?? 'invalid plan'}` }] : []),
             ];
-            const data = { readiness: result, ...(planInspection === undefined ? {} : { plan: planInspection }), ...(advisories.length ? { advisories } : {}), ...(locationIssues.length ? { misplacedArtifacts: locationIssues } : {}), ...(automaticSync ? { automaticSync } : {}) };
+            const data = { readiness: result, ...(closureIntegrity ? { closureIntegrity } : {}), ...(planInspection === undefined ? {} : { plan: planInspection }), ...(advisories.length ? { advisories } : {}), ...(locationIssues.length ? { misplacedArtifacts: locationIssues } : {}), ...(automaticSync ? { automaticSync } : {}) };
             if (json) console.log(JSON.stringify(envelope(result.ready, data, result.ready ? null : { code: 'validation_failed', message: 'Change is not ready.', recovery: 'Resolve the listed blockers and validate again.' }, [])));
             else {
               const lines: string[] = [];
               lines.push(section(`Validate: ${change.name} (${id})`));
               lines.push(kv('Ready', result.ready ? ok('yes') : err('no')));
+              if (closureIntegrity) lines.push(kv('Closure integrity', closureIntegrity.valid ? ok(`valid (${closureIntegrity.checkedChildren} child closure(s) checked)`) : err(`${closureIntegrity.issues.length} issue(s)`)));
               if (result.blockers?.length) {
                 lines.push(section('Blockers'));
                 for (const b of result.blockers) lines.push(bullet(String(b.message ?? b)));
