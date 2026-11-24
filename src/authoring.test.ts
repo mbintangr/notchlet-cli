@@ -114,15 +114,29 @@ test('authoring integrity covers batch apply, item edits, strict options, revisi
     assert.equal(unsupportedField.status, 64);
     assert.match(JSON.parse(unsupportedField.stdout).error.message, /Unsupported batch field extra/);
 
-    const drifting = run(['change', 'render', id, '--check', '--json']);
+    const diffWithoutMode = run(['change', 'render', id, '--diff', '--json']);
+    assert.equal(diffWithoutMode.status, 64);
+    assert.equal(JSON.parse(diffWithoutMode.stdout).error.code, 'usage_error');
+    const drifting = run(['change', 'render', id, '--check', '--diff', '--json']);
     assert.equal(drifting.status, 1);
     const driftData = JSON.parse(drifting.stdout).data;
     assert.equal(driftData.drifted, true);
     assert.ok(driftData.artifacts.filter((artifact: any) => artifact.role === 'rendered' || artifact.role === 'canonical').every((artifact: any) => artifact.status === 'drifted'));
+    assert.deepEqual(driftData.diffs.map((entry: any) => entry.artifact), ['proposal.json', 'spec.json']);
+    assert.match(driftData.diffs[0].diff, /^--- a\/proposal\.json\n\+\+\+ b\/proposal\.json\n@@ /);
+    assert.match(driftData.diffs[0].diff, /^-/m);
+    assert.match(driftData.diffs[0].diff, /^\+/m);
+    assert.equal(JSON.parse(await readFile(tasksFile, 'utf8')).revision, 4, '--check --diff is read-only');
+    const diffHuman = run(['change', 'render', id, '--check', '--diff']);
+    assert.equal(diffHuman.status, 1);
+    assert.match(diffHuman.stdout, /proposal\.json \(drifted\): proposal\.json/);
+    assert.match(diffHuman.stdout, /--- a\/proposal\.json/);
     const written = run(['change', 'render', id, '--write', '--json']);
     assert.equal(written.status, 0, written.stderr);
     const writtenData = JSON.parse(written.stdout).data;
     assert.deepEqual(writtenData.written, ['proposal.json', 'spec.json']);
+    assert.deepEqual(writtenData.diffs.map((entry: any) => entry.artifact), ['proposal.json', 'spec.json']);
+    assert.match(writtenData.diffs[0].diff, /@@ /);
     assert.equal(writtenData.change.revision, 5);
     assert.equal(run(['change', 'render', id, '--check', '--json']).status, 0);
 

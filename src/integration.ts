@@ -5,6 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { BACKLOG_SCHEMA_VERSION, changeRefHash, inspectGitContext, parseChange, resolveChangeLocation, scaffold, readChange, readBacklogSidecar, writeBacklogSidecar, withLinkedItem, type BacklogSidecar, type Change } from '@notchlet/core';
 import { getProfile, resolveCredential, type AuthProfile, type CredentialStore } from './auth.js';
+import { deriveImportScaffold } from './import-scaffold.js';
 
 export type Fetcher = typeof fetch;
 const positiveId = (n: number) => Number.isSafeInteger(n) && n > 0;
@@ -735,10 +736,10 @@ export async function importBacklogItem(root: string, input: { productId: number
   await writeFile(path.join(root, '.notchlet', 'changes', change.id, 'proposal.md'), proposal);
   const tasksFile = path.join(root, '.notchlet', 'changes', change.id, 'tasks.json');
   const imported = parseChange(await readFile(tasksFile, 'utf8'));
-  const requirementId = `REQ-ITEM-${input.itemId}`;
   const criteria = item.acceptanceCriteria ?? item.acceptanceCriteriaText ?? item.item?.acceptanceCriteria;
-  const checkDescriptions: string[] = Array.isArray(criteria) ? criteria.filter((v: unknown) => typeof v === 'string' && v.trim()) : typeof criteria === 'string' && criteria.trim() ? [criteria] : [];
-  const next: Change = { ...imported, requirements: [{ id: requirementId, title, description: description || title }], checks: (checkDescriptions.length ? checkDescriptions : [`Verify the requirements and acceptance criteria for backlog item ${input.itemId}.`]).map((text, index) => ({ id: `CHECK-ITEM-${input.itemId}-${index + 1}`, description: text })), tasks: [{ id: `TASK-ITEM-${input.itemId}`, title: `Implement backlog item ${input.itemId}`, status: 'pending', dependencies: [], requirementIds: [requirementId] }] };
+  const structuredCriteria: string[] = Array.isArray(criteria) ? criteria.filter((v: unknown): v is string => typeof v === 'string' && Boolean(v.trim())) : typeof criteria === 'string' && criteria.trim() ? [criteria] : [];
+  const scaffolded = deriveImportScaffold({ itemId: input.itemId, title, description, acceptanceCriteria: structuredCriteria });
+  const next: Change = { ...imported, requirements: scaffolded.requirements, checks: scaffolded.checks, tasks: scaffolded.tasks };
   await writeFile(tasksFile, `${JSON.stringify(next, null, 2)}\n`);
   await writeFile(marker, `${JSON.stringify({ server: (await getProfile(input.server))?.serverIdentity, productId: input.productId, itemId: input.itemId, changeId: change.id }, null, 2)}\n`, { flag: 'wx' });
   return next;

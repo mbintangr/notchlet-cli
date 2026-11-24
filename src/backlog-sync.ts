@@ -30,6 +30,7 @@ import {
   type Change,
   type ChangeTreeNode,
 } from '@notchlet/core';
+import { deriveImportScaffold } from './import-scaffold.js';
 import {
   callMcpTool,
   platformApi,
@@ -176,12 +177,6 @@ function acceptanceCriteria(item: RemoteBacklogItem): string[] {
   return typeof raw === 'string' && raw.trim() ? [raw] : [];
 }
 
-function checksFor(item: RemoteBacklogItem): Change['checks'] {
-  const criteria = acceptanceCriteria(item);
-  const descriptions = criteria.length ? criteria : [`Verify the requirements and acceptance criteria for backlog item ${item.id}.`];
-  return descriptions.map((description, index) => ({ id: `CHECK-ITEM-${item.id}-${index + 1}`, description }));
-}
-
 interface ImportedNode { itemId: number; itemType: BacklogItemType; relativePath: string; action: 'created' | 'reused' | 'legacy'; }
 export interface BacklogTreeImportResult {
   productId: number;
@@ -223,15 +218,10 @@ async function writeImportMarker(root: string, input: { server?: string; product
 }
 
 function authorImportedChange(change: Change, item: RemoteBacklogItem, leaf: boolean): Change {
-  const requirementId = `REQ-ITEM-${item.id}`;
-  const description = item.description?.trim() || item.title;
-  const requirements = change.requirements.some(requirement => requirement.id === requirementId)
-    ? change.requirements
-    : [...change.requirements, { id: requirementId, title: item.title, description }];
-  const checks = change.checks.length ? change.checks : checksFor(item);
-  const tasks = leaf && change.tasks.length === 0
-    ? [{ id: `TASK-ITEM-${item.id}`, title: `Implement backlog item ${item.id}`, status: 'pending' as const, dependencies: [], requirementIds: [requirementId] }]
-    : change.tasks;
+  const derived = deriveImportScaffold({ itemId: item.id, title: item.title, description: item.description ?? '', acceptanceCriteria: acceptanceCriteria(item) });
+  const requirements = change.requirements.length ? change.requirements : derived.requirements;
+  const checks = change.checks.length ? change.checks : derived.checks;
+  const tasks = leaf && change.tasks.length === 0 ? derived.tasks : change.tasks;
   return { ...change, intent: change.intent || item.description?.trim() || item.title, requirements, checks, tasks };
 }
 

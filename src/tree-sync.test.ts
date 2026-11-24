@@ -175,8 +175,8 @@ test('backlog import --tree scaffolds the platform hierarchy key-first and is id
     assert.equal(task?.platform.itemId, 3);
     assert.equal((await readChange(f.root, 'nt-1-user-authentication')).tasks.length, 0, 'rollup nodes do not author their own tasks');
     const leaf = await readChange(f.root, 'nt-1-user-authentication/nt-2-login-flow/nt-3-login-form');
-    assert.deepEqual(leaf.tasks.map(task => task.id), ['TASK-ITEM-3']);
-    assert.deepEqual(leaf.requirements.map(requirement => requirement.id), ['REQ-ITEM-3']);
+    assert.deepEqual(leaf.tasks.map(task => task.id), ['TASK-1']);
+    assert.deepEqual(leaf.requirements.map(requirement => requirement.id), ['REQ-1']);
     assert.ok(leaf.checks.length >= 1);
     assert.equal((await buildChangeTree(f.root)).counts.total, 3);
 
