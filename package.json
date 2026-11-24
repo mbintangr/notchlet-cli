@@ -1,6 +1,6 @@
 {
   "name": "@notchlet/cli",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -17,6 +17,7 @@
     "dist/cli-prompt.js",
     "dist/guidance-install.js",
     "dist/history.js",
+    "dist/import-scaffold.js",
     "dist/integration.js",
     "dist/backlog-sync.js",
     "dist/bootstrap.js",
@@ -42,7 +43,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@napi-rs/keyring": "^2.1.2",
-    "@notchlet/core": "^1.2.1"
+    "@notchlet/core": "^1.2.2"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
