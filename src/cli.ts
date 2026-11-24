@@ -27,7 +27,7 @@ async function profileAsync<T>(name: string, operation: () => Promise<T>): Promi
 const json = args.includes('--json');
 // Boolean switches never consume a following token. Every other `--flag` is treated as
 // taking a value, so new commands work without maintaining a flag allowlist.
-const booleanFlags = new Set(['--json', '--help', '-h', '--version', '--local', '--interactive', '--quick', '--preview', '--yes', '--revoke', '--apply', '--allow-file-token-store', '--keep-local', '--force', '--record', '--remote', '--offline', '--stale', '--failed', '--require-evidence', '--dry-run', '--render', '--no-render', '--markdown', '--full-page', '--expect-no-console-errors', '--all', '--all-missing', '--serve', '--keep-running', '--reuse-serve', '--save-setup', '--check-setup-idempotence', '--accept-plan-drift', '--history', '--tree', '--create', '--rebind']);
+const booleanFlags = new Set(['--json', '--help', '-h', '--version', '--local', '--interactive', '--quick', '--preview', '--yes', '--revoke', '--apply', '--allow-file-token-store', '--keep-local', '--force', '--record', '--remote', '--offline', '--stale', '--failed', '--require-evidence', '--dry-run', '--render', '--no-render', '--markdown', '--full-page', '--expect-no-console-errors', '--all', '--all-missing', '--serve', '--keep-running', '--reuse-serve', '--save-setup', '--check-setup-idempotence', '--accept-plan-drift', '--history', '--tree', '--create', '--rebind', '--diff']);
 const positional: string[] = [];
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
@@ -452,7 +452,7 @@ notchlet status <change> --tree
 notchlet change show <change>
 notchlet change path <change> [artifact]
 notchlet instructions <change> --action implement
-notchlet change render <change> --check
+notchlet change render <change> --check --diff
 notchlet verify <change> --record --serve --capture-url http://localhost:3000
 notchlet schema closure.v1
 notchlet change close <change> --preview
@@ -520,7 +520,7 @@ ${section('Changes')}
   change remove <name|id> requirement|check|scenario|decision|task <item-id>   Remove authored content
   change convert <name|id> --schema quick|standard [--revision <n>]   Convert a change schema
   change apply <name|id> --file <path> [--revision <n>]     Apply an ordered authoring batch atomically
-  change render <name|id> [--check|--write] [--force] [--markdown] [--tree]  Render canonical and optional Markdown artifacts
+  change render <name|id> [--check|--write] [--force] [--markdown] [--tree] [--diff]  Render canonical and optional Markdown artifacts; --diff previews drift
   change plan status <name|id> | validate <path> | sync <name|id>        Inspect, validate, or accept plan provenance
   change close <name|id> --preview [--fail-on-blockers] | --baseline-revision <n> [--yes] [--markdown] [--accept-plan-drift] [--accept-artifact-basis]   Close and archive a change
 
@@ -653,6 +653,75 @@ async function artifactContents(root: string, id: string, change: Awaited<Return
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
   return result;
+}
+
+interface ArtifactDiffEntry { artifact: string; path: string; status: string; diff: string; }
+
+function unifiedDiff(before: string, after: string, label: string, context = 3): string {
+  const a = before.replace(/\r\n?/g, '\n').split('\n');
+  const b = after.replace(/\r\n?/g, '\n').split('\n');
+  const header = `--- a/${label}\n+++ b/${label}`;
+  if (a.length * b.length > 4_000_000) return `${header}\n@@ full-file replacement: ${a.length} -> ${b.length} lines @@`;
+  const width = b.length + 1;
+  const dp = new Uint32Array((a.length + 1) * width);
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      dp[i * width + j] = a[i] === b[j] ? dp[(i + 1) * width + j + 1] + 1 : Math.max(dp[(i + 1) * width + j], dp[i * width + j + 1]);
+    }
+  }
+  const ops: Array<{ type: ' ' | '-' | '+'; text: string }> = [];
+  let i = 0, j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { ops.push({ type: ' ', text: a[i++] }); j++; }
+    else if (dp[(i + 1) * width + j] >= dp[i * width + j + 1]) ops.push({ type: '-', text: a[i++] });
+    else ops.push({ type: '+', text: b[j++] });
+  }
+  while (i < a.length) ops.push({ type: '-', text: a[i++] });
+  while (j < b.length) ops.push({ type: '+', text: b[j++] });
+  const positions: Array<{ oldLine: number; newLine: number }> = [];
+  let oldLine = 1, newLine = 1;
+  for (const op of ops) {
+    positions.push({ oldLine, newLine });
+    if (op.type !== '+') oldLine++;
+    if (op.type !== '-') newLine++;
+  }
+  const changed = ops.flatMap((op, index) => (op.type === ' ' ? [] : [index]));
+  if (!changed.length) return '';
+  const hunks: string[] = [header];
+  for (let cursor = 0; cursor < changed.length; cursor++) {
+    const start = Math.max(0, changed[cursor] - context);
+    let end = changed[cursor];
+    while (cursor + 1 < changed.length && changed[cursor + 1] - end <= context * 2 + 1) end = changed[++cursor];
+    end = Math.min(ops.length - 1, end + context);
+    const slice = ops.slice(start, end + 1);
+    const oldCount = slice.filter(op => op.type !== '+').length;
+    const newCount = slice.filter(op => op.type !== '-').length;
+    const oldStart = oldCount ? positions[start].oldLine : positions[start].oldLine - 1;
+    const newStart = newCount ? positions[start].newLine : positions[start].newLine - 1;
+    hunks.push(`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`, ...slice.map(op => `${op.type}${op.text}`));
+  }
+  return hunks.join('\n');
+}
+
+async function artifactDiffPreview(root: string, id: string, change: Awaited<ReturnType<typeof readChange>>, options: { archived?: boolean; markdown?: boolean; statuses?: Map<string, string> } = {}): Promise<ArtifactDiffEntry[]> {
+  const model = options.markdown ? withMarkdownArtifacts(change) : change;
+  const existing = await artifactContents(root, id, model, { archived: options.archived });
+  const entries: ArtifactDiffEntry[] = [];
+  for (const rendered of renderChangeArtifacts(model)) {
+    const before = existing[rendered.path];
+    if (before === rendered.content) continue;
+    const status = options.statuses?.get(rendered.artifact) ?? (before === undefined ? 'missing' : 'drifted');
+    entries.push({ artifact: rendered.artifact, path: rendered.path, status, diff: unifiedDiff(before ?? '', rendered.content, rendered.path) });
+  }
+  return entries;
+}
+
+function artifactStatuses(result: { artifacts: Array<{ artifact: string; status: string }> }): Map<string, string> {
+  return new Map(result.artifacts.map(artifact => [artifact.artifact, artifact.status]));
+}
+
+function printArtifactDiffs(diffs: ArtifactDiffEntry[]): void {
+  for (const entry of diffs) console.log(`\n${entry.artifact} (${entry.status}): ${entry.path}\n${entry.diff}`);
 }
 
 async function readArchivedClosure(root: string, id: string): Promise<Record<string, unknown> | undefined> {
@@ -1399,6 +1468,11 @@ Options:
 
   Import a backlog item as a change, or import its platform subtree as a local backlog tree.
 
+  Import derives requirements from the description: one per acceptance criteria bullet
+  (structured acceptance criteria are the fallback), a check stub per requirement linked to
+  it, and task stubs from scope bullets. IDs are positional (REQ-n, CHECK-n, TASK-n);
+  changes stay editable with the usual authoring commands.
+
 Options:
   <item-key|title|id>  Backlog key, title, or numeric ID
   --product-id <id>    Product ID (defaults to the workspace binding)
@@ -1889,7 +1963,7 @@ Options:
   remove <name|id> <kind> <id> [--revision <n>]   Remove an authored item
   convert <name|id> --schema <q|s> [--revision <n>] Convert a change schema
   apply <name|id> --file <path> [--revision <n>]  Apply an ordered batch of authoring operations; removal batches run order-independently, dependents first
-  render <name|id> [--check|--write] [--force] [--tree]    Render model-derived proposal/spec/tasks artifacts
+  render <name|id> [--check|--write] [--force] [--tree] [--diff]   Render model-derived proposal/spec/tasks artifacts; --diff shows unified drift previews
   baseline <name|id> [--capability <name>] [--revision <n>]
                                  Capture the current capability baseline revision
   delta <name|id> add|update|remove|delete --requirement <id> [--rationale <text>]
@@ -1957,6 +2031,7 @@ Options:
   --file <path>            JSON batch file with expectedRevision and ordered operations (apply)
   --check                  Report artifact drift without writing (render)
   --write                  Atomically write rendered artifacts and bump the revision once (render)
+  --diff                   With --check, print per-artifact unified diffs; --write reports rewritten diffs (render)
   --force                  Overwrite artifacts without the generated-content marker (render)
   --preview                Preview closure without changing files (for close)
   --fail-on-blockers       With --preview, exit 1 when closure blockers remain (for CI)
@@ -2591,12 +2666,13 @@ Options:
         const setupHint = setupAdvisory(result.change);
         printWithSync({ change: result.change, applied: result.applied }, await syncIfAutomatic(root, id), `Applied ${result.applied} operation(s) to ${id} (revision ${result.change.revision ?? 0}).`, setupHint ? [setupHint] : []);
       } else if (action === 'render') {
-        assertOptions(['--check', '--write', '--force', '--markdown', '--tree'], 'change render');
+        assertOptions(['--check', '--write', '--force', '--markdown', '--tree', '--diff'], 'change render');
         const root = await requireWorkspace('change render');
         const changeRef = positional[2];
         if (!changeRef) fail('usage_error', usage, 'Use `notchlet change render <change> [--check|--write] [--force]`.', 64);
         if (args.includes('--check') && args.includes('--write')) fail('usage_error', 'Choose either --check or --write for change render.', 'Use --check to report drift without writing, or --write to render artifacts.', 64);
         if (args.includes('--markdown') && !args.includes('--write')) fail('usage_error', '--markdown requires --write.', 'Add --write to declare and render optional Markdown views.', 64);
+        if (args.includes('--diff') && !args.includes('--check') && !args.includes('--write')) fail('usage_error', '--diff requires --check or --write.', 'Use `notchlet change render <change> --check --diff` to preview artifact drift.', 64);
         const tree = args.includes('--tree');
         if (tree && !args.includes('--check') && !args.includes('--write')) fail('usage_error', '--tree requires --check or --write.', 'Use `notchlet change render <change> --tree --write` to render a whole subtree.', 64);
         const target = await resolveChangeTarget(root, changeRef);
@@ -2614,7 +2690,7 @@ Options:
                 const result = await inspectChangeArtifacts(root, node.id);
                 const nodeDrift = result.drifted || result.executionDrift.status === 'drifted';
                 drifted ||= nodeDrift;
-                entries.push({ id: node.id, relativePath: node.relativePath, ...result });
+                entries.push({ id: node.id, relativePath: node.relativePath, ...result, ...(args.includes('--diff') ? { diffs: await artifactDiffPreview(root, node.id, result.change, { statuses: artifactStatuses(result) }) } : {}) });
               } catch (error) {
                 drifted = true;
                 entries.push({ id: node.id, relativePath: node.relativePath, error: error instanceof Error ? error.message : String(error) });
@@ -2635,6 +2711,13 @@ Options:
               }
               lines.push(kv('Drifted', drifted ? err('yes') : ok('no')));
               console.log(box(lines));
+              if (args.includes('--diff')) {
+                for (const node of nodes) {
+                  const entry = entries.find(item => item.id === node.id)!;
+                  const diffs = entry.diffs as ArtifactDiffEntry[] | undefined;
+                  if (diffs?.length) { console.log(section(`Diff: ${node.relativePath}`)); printArtifactDiffs(diffs); }
+                }
+              }
             }
             if (drifted) process.exitCode = 1;
           } else {
@@ -2644,10 +2727,11 @@ Options:
             for (const node of nodes) {
               if (node.closed) { entries.push({ id: node.id, relativePath: node.relativePath, archived: true }); continue; }
               try {
+                const preview = await artifactDiffPreview(root, node.id, await readChange(root, node.id), { markdown: args.includes('--markdown') });
                 const result = await writeChangeArtifacts(root, node.id, { force: args.includes('--force'), markdown: args.includes('--markdown') });
                 const sync = await syncIfAutomatic(root, node.id);
                 refused += result.refused.length;
-                entries.push({ id: node.id, relativePath: node.relativePath, written: result.written, unchanged: result.unchanged, refused: result.refused, revision: result.change.revision ?? 0, ...(sync ? { sync } : {}) });
+                entries.push({ id: node.id, relativePath: node.relativePath, written: result.written, unchanged: result.unchanged, refused: result.refused, revision: result.change.revision ?? 0, diffs: preview.filter(entry => result.written.includes(entry.artifact)), ...(sync ? { sync } : {}) });
               } catch (error) {
                 failed++;
                 entries.push({ id: node.id, relativePath: node.relativePath, error: error instanceof Error ? error.message : String(error) });
@@ -2668,12 +2752,18 @@ Options:
                 if (sync?.state) lines.push(bullet(`sync: ${sync.state}`, '↳'));
               }
               console.log(box(lines));
+              for (const node of nodes) {
+                const entry = entries.find(item => item.id === node.id)!;
+                const diffs = entry.diffs as ArtifactDiffEntry[] | undefined;
+                if (diffs?.length) { console.log(section(`Diff: ${node.relativePath}`)); printArtifactDiffs(diffs); }
+              }
             }
             if (refused || failed) process.exitCode = 1;
           }
         } else if (args.includes('--check')) {
           const result = await inspectChangeArtifacts(root, id);
-          if (json) { print({ ...result, archived: target.archived }); }
+          const diffs = args.includes('--diff') ? await artifactDiffPreview(root, id, result.change, { archived: target.archived, statuses: artifactStatuses(result) }) : undefined;
+          if (json) { print({ ...result, archived: target.archived, ...(diffs ? { diffs } : {}) }); }
           else {
             const lines: string[] = [section(`Artifact drift: ${id}`)];
             if (!result.artifacts.length) lines.push(warn('(no declared artifacts)'));
@@ -2682,13 +2772,16 @@ Options:
             lines.push(kv('Execution metadata', `${executionLabel}${result.executionDrift.status === 'drifted' ? ` — ${result.executionDrift.recovery}` : ''}`));
             lines.push(kv('Drifted', result.drifted || result.executionDrift.status === 'drifted' ? err('yes') : ok('no')));
             console.log(box(lines));
+            if (diffs) printArtifactDiffs(diffs);
           }
           if (result.drifted || result.executionDrift.status === 'drifted') process.exitCode = 1;
         } else if (args.includes('--write')) {
           if (target.archived) fail('archived_change', `Change ${id} is archived and cannot be rendered in place.`, `Restore it with \`notchlet change restore ${id}\` first.`, 1);
+          const preview = await artifactDiffPreview(root, id, await readChange(root, id), { markdown: args.includes('--markdown') });
           const result = await writeChangeArtifacts(root, id, { force: args.includes('--force'), markdown: args.includes('--markdown') });
           const automaticSync = await syncIfAutomatic(root, id);
-          if (json) { printWithSync(result, automaticSync); }
+          const diffs = preview.filter(entry => result.written.includes(entry.artifact));
+          if (json) { printWithSync({ ...result, diffs }, automaticSync); }
           else {
             const lines: string[] = [section(`Artifacts rendered: ${id}`)];
             lines.push(kv('Written', result.written.join(', ') || '(none)'));
@@ -2696,6 +2789,7 @@ Options:
             for (const refusal of result.refused) lines.push(kv('Refused', `${refusal.artifact} (${refusal.reason})`));
             lines.push(kv('Revision', String(result.change.revision ?? 0)));
             console.log(box(lines));
+            printArtifactDiffs(diffs);
             if (automaticSync) console.log(`Automatic sync: ${(automaticSync as any)?.state ?? 'pending'}`);
           }
           if (result.refused.length) process.exitCode = 1;

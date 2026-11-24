@@ -791,7 +791,7 @@ test('workspace bind CLI uses the nearest nested workspace unless --workspace se
   const config = path.join(parent, 'config'), cli = process.env.NOTCHLET_PACKED_CLI_PATH ?? path.resolve('dist/cli.js');
   const oldConfig = process.env.NOTCHLET_CONFIG_DIR, oldToken = process.env.NOTCHLET_TOKEN;
   process.env.NOTCHLET_CONFIG_DIR = config; process.env.NOTCHLET_TOKEN = 'binding-command-local-token';
-  const backlogItems: any[] = [{ id: 55, productId: 31, parentId: null, itemType: 'STORY', key: 'APP-55', title: 'Packed import fixture', description: 'Packed CLI import acceptance.', acceptanceCriteria: ['Preserve the selected item description.'], status: 'TODO' }];
+  const backlogItems: any[] = [{ id: 55, productId: 31, parentId: null, itemType: 'STORY', key: 'APP-55', title: 'Packed import fixture', description: 'Packed CLI import acceptance.\n\n## Acceptance criteria\n\n- Preserve the selected item description.\n- Keep the import marker.\n\n## Scope\n\n- Import the packed fixture.\n- Verify the imported change.', status: 'TODO' }];
   let nextBacklogId = 56;
   const server = createServer((req, res) => {
     if (req.method !== 'POST') { res.writeHead(405).end(); return; }
@@ -865,18 +865,27 @@ test('workspace bind CLI uses the nearest nested workspace unless --workspace se
     const imported = await runCli(['backlog', 'import', 'APP-55', '--server', 'https://cli-bind.example', '--endpoint', endpoint, '--json'], nested);
     assert.equal(imported.status, 0, `${imported.stderr}\n${imported.stdout}`);
     const importedChange = JSON.parse(imported.stdout).data.change;
-    assert.equal(importedChange.requirements[0].id, 'REQ-ITEM-55');
-    assert.equal(importedChange.requirements[0].title, 'Packed import fixture');
+    assert.deepEqual(importedChange.requirements.map((requirement: any) => requirement.id), ['REQ-1', 'REQ-2']);
+    assert.equal(importedChange.requirements[0].id, 'REQ-1');
+    assert.equal(importedChange.requirements[0].title, 'Preserve the selected item description.');
+    assert.deepEqual(importedChange.checks.map((check: any) => [check.id, check.requirementIds]), [['CHECK-1', ['REQ-1']], ['CHECK-2', ['REQ-2']]]);
+    assert.deepEqual(importedChange.tasks.map((task: any) => [task.id, task.title]), [['TASK-1', 'Import the packed fixture.'], ['TASK-2', 'Verify the imported change.']]);
+    assert.deepEqual(importedChange.tasks[0].requirementIds, ['REQ-1', 'REQ-2']);
+    assert.doesNotMatch(JSON.stringify(importedChange), /ITEM-\d/);
     assert.match(await readFile(path.join(nested, '.notchlet', 'changes', importedChange.id, 'proposal.md'), 'utf8'), /Packed CLI import acceptance/);
+    const authored = await runCli(['change', 'update', importedChange.name, '--intent', 'Import the packed fixture', '--outcome', 'The packed fixture imports and validates', '--capability-impact', 'none', '--capability-rationale', 'Import scaffolds local tracking only.', '--revision', '0', '--json'], nested);
+    assert.equal(authored.status, 0, `${authored.stderr}\n${authored.stdout}`);
+    const validated = await runCli(['validate', importedChange.name, '--json'], nested);
+    assert.equal(validated.status, 0, `${validated.stderr}\n${validated.stdout}`);
 
-    const taskStart = await runCli(['task', 'start', 'Implement backlog item 55', '--change', importedChange.name, '--revision', '0', '--json'], nested);
+    const taskStart = await runCli(['task', 'start', 'Import the packed fixture.', '--change', importedChange.name, '--revision', '1', '--json'], nested);
     assert.equal(taskStart.status, 0, `${taskStart.stderr}\n${taskStart.stdout}`);
     assert.equal(JSON.parse(await readFile(path.join(nested, '.notchlet', 'changes', importedChange.id, 'tasks.json'), 'utf8')).tasks[0].status, 'in_progress');
-    const taskComplete = await runCli(['task', 'complete', 'Implement backlog item 55', '--change', importedChange.name, '--revision', '1', '--json'], nested);
+    const taskComplete = await runCli(['task', 'complete', 'Import the packed fixture.', '--change', importedChange.name, '--revision', '2', '--json'], nested);
     assert.equal(taskComplete.status, 0, `${taskComplete.stderr}\n${taskComplete.stdout}`);
 
     const evidencePath = path.join(nested, 'backlog verification.json');
-    await writeFile(evidencePath, JSON.stringify({ kind: 'check', outcome: 'passed', summary: 'Backlog item acceptance was verified.', command: 'mock integration workflow', requirementIds: ['REQ-ITEM-55'], taskIds: ['TASK-ITEM-55'], checkIds: ['CHECK-ITEM-55-1'], provenance: 'recorded' }));
+    await writeFile(evidencePath, JSON.stringify({ kind: 'check', outcome: 'passed', summary: 'Backlog item acceptance was verified.', command: 'mock integration workflow', requirementIds: ['REQ-1', 'REQ-2'], taskIds: ['TASK-1', 'TASK-2'], checkIds: ['CHECK-1', 'CHECK-2'], provenance: 'recorded' }));
     const evidence = await runCli(['evidence', 'record', '--change', importedChange.name, '--file', evidencePath, '--json'], nested);
     assert.equal(evidence.status, 0, `${evidence.stderr}\n${evidence.stdout}`);
     assert.equal((await readFile(path.join(nested, '.notchlet', 'changes', importedChange.id, 'evidence.jsonl'), 'utf8')).trim().split('\n').length, 1);
