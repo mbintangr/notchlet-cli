@@ -10,7 +10,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { initWorkspace, scaffold } from '@notchlet/core';
 import { authCommand, resolveCredential, type CredentialStore } from './auth.js';
-import { autoSyncChange, bindWorkspace, callMcpTool, doctor, getWorkspaceSyncMode, importBacklogItem, linkChange, setWorkspaceSyncMode, syncCheckpoint, syncDeliver, syncPull, syncPush, syncResolve, syncStatus } from './integration.js';
+import { autoSyncChange, bindWorkspace, callMcpTool, doctor, getWorkspaceSyncMode, importBacklogItem, linkChange, setWorkspaceSyncMode, syncCheckpoint, syncDeliver, syncPull, syncPush, syncResolve, syncStatus, versionWarnings } from './integration.js';
 
 function mockDevelopmentServer(state: { capabilities: any; productAccessible?: boolean; repository?: any }) {
   const tools = ['workspace_context', 'product_get_details', 'backlog_list', 'backlog_get', 'backlog_development_context'].map(name => ({ name, description: name, inputSchema: { type: 'object', properties: {} } }));
@@ -332,9 +332,9 @@ async function syncFixture() {
   await writeFile(path.join(root, '.notchlet', 'workspace.json'), JSON.stringify({ binding: { server, serverIdentity: 'sync-server', protocol: syncCapabilities.protocol, coreVersion: '1.0.0', schemaVersion: '1.0.0', productId: 31, repositoryId: 7 } }));
   await authCommand('login', { server, json: true });
   const remoteId = '11111111-1111-4111-8111-111111111111';
-  const remote: { metadata: any; snapshots: any[]; content: Map<string, any>; requests: any[]; uploadStatus: number | null; caps: any; operations: Map<string, any>; loseNextWriteResponse: boolean; checkpointComments: any[] } = {
+  const remote: { metadata: any; snapshots: any[]; content: Map<string, any>; requests: any[]; uploadStatus: number | null; caps: any; operations: Map<string, any>; loseNextWriteResponse: boolean; checkpointComments: any[]; backlogStatus: string } = {
     metadata: { id: remoteId, productId: 31, title: '', status: 'open', revision: 1, snapshotRevision: null },
-    snapshots: [], content: new Map(), requests: [], uploadStatus: null, caps: syncCapabilities, operations: new Map(), loseNextWriteResponse: false, checkpointComments: [],
+    snapshots: [], content: new Map(), requests: [], uploadStatus: null, caps: syncCapabilities, operations: new Map(), loseNextWriteResponse: false, checkpointComments: [], backlogStatus: 'IN_PROGRESS',
   };
   const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
@@ -342,6 +342,11 @@ async function syncFixture() {
     const body = init?.body ? JSON.parse(String(init.body)) : null;
     remote.requests.push({ path: url.pathname, method, headers: init?.headers, body });
     if (url.pathname.endsWith('/capabilities')) return Response.json(remote.caps);
+    if (url.pathname === '/auth/login' && method === 'POST') {
+      const accessToken = `header.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url')}.signature`;
+      return Response.json({ accessToken, refreshToken: 'refresh-token', user: { email: body.email } });
+    }
+    if (url.pathname === '/backlog/1518' && method === 'GET') return Response.json({ id: 1518, productId: 31, status: remote.backlogStatus });
     if (url.pathname.startsWith('/development/v1/operations/') && method === 'GET') {
       const operation = remote.operations.get(url.pathname.split('/').pop()!);
       return operation ? Response.json(operation) : Response.json({ code: 'NOT_FOUND' }, { status: 404 });
@@ -532,6 +537,77 @@ test('sync keeps the local change id in snapshot metadata while delivering by pl
     const deliveryPost = f.remote.requests.filter(r => r.method === 'POST' && r.path.endsWith('/delivery')).at(-1)!;
     assert.equal(deliveryPost.path, `/development/v1/changes/${f.remoteId}/delivery`);
   } finally { await f.dispose(); }
+});
+
+test('sync status reconciles live platform status with local work and reports the persisted delivery outcome', async () => {
+  const f = await syncFixture();
+  try {
+    const change = await scaffold(f.root, 'Reconciled change', 'quick');
+    assert.equal((await syncPush(f.root, change.id, { server: f.server, fetch: f.fetcher, yes: true })).state, 'pushed');
+    await mkdir(path.join(f.root, '.notchlet', 'imports'), { recursive: true });
+    await writeFile(path.join(f.root, '.notchlet', 'imports', '1518.json'), JSON.stringify({ server: 'sync-server', productId: 31, itemId: 1518, changeId: change.id }));
+    await authCommand('login', { server: f.server, email: 'sync@example.test', password: 'secret', json: true, forceUserLogin: true, fetch: f.fetcher });
+    f.remote.backlogStatus = 'DONE';
+    const opened = await syncStatus(f.root, change.id, { server: f.server, fetch: f.fetcher });
+    assert.equal(opened.state, 'unchanged');
+    assert.equal(opened.reconciliation.platform.status, 'DONE');
+    assert.equal(opened.reconciliation.platform.itemId, 1518);
+    assert.equal(opened.reconciliation.local.status, 'open');
+    assert.deepEqual(opened.reconciliation.local.tasks, { completed: 0, total: 0 });
+    assert.equal(opened.reconciliation.local.localClosure, 'open');
+    assert.equal(opened.reconciliation.delivery.state, 'not_delivered');
+    assert.equal(opened.reconciliation.divergence?.code, 'status_divergent');
+    assert.equal(opened.reconciliation.divergence?.reason, 'platform_done_local_open');
+    assert.match(opened.reconciliation.divergence?.recovery ?? '', /notchlet change close/);
+
+    const delivered = await syncDeliver(f.root, change.id, { status: 'DONE' }, { server: f.server, fetch: f.fetcher });
+    assert.equal(delivered.state, 'delivered');
+    const persisted = JSON.parse(await readFile(path.join(f.root, '.notchlet', '.local', 'sync', `${change.id}.json`), 'utf8'));
+    assert.equal(persisted.delivery.state, 'delivered');
+    assert.equal(persisted.delivery.status, 'DONE');
+    assert.equal(persisted.remoteId, f.remoteId);
+    const offline = await syncStatus(f.root, change.id, { server: f.server, fetch: (async () => { throw new TypeError('offline'); }) as typeof fetch });
+    assert.equal(offline.state, 'unknown');
+    assert.equal(offline.reconciliation.platform.status, 'unknown');
+    assert.equal(offline.reconciliation.delivery.state, 'delivered');
+    assert.match(offline.remoteError ?? '', /offline/);
+  } finally { await f.dispose(); }
+});
+
+test('doctor reports version skew and stale host package warnings with remediation, and stays quiet offline', async () => {
+  assert.deepEqual(versionWarnings('1.2.0', '1.2.0', '1.2.0'), []);
+  const skew = versionWarnings('1.1.1', '1.1.0', null);
+  assert.equal(skew[0]?.code, 'version_skew');
+  assert.match(skew[0]?.recovery ?? '', /npm install -g @notchlet\/cli@latest/);
+  const stale = versionWarnings('1.1.0', '1.1.0', '1.2.0');
+  assert.equal(stale[0]?.code, 'host_package_stale');
+  assert.match(stale[0]?.recovery ?? '', /npm install -g @notchlet\/cli@latest/);
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'notchlet-doctor-version-'));
+  const oldConfig = process.env.NOTCHLET_CONFIG_DIR, oldToken = process.env.NOTCHLET_TOKEN;
+  process.env.NOTCHLET_CONFIG_DIR = path.join(dir, 'config'); process.env.NOTCHLET_TOKEN = 'doctor-version-token';
+  try {
+    await authCommand('login', { server: 'https://versions.example', json: true });
+    const caps = { server: { id: 'versions-server', version: '1.0.0' }, protocol: { minimum: '1.0', maximum: '1.0' }, versions: { core: '1.0.0', schema: '1.0.0' }, operations: ['read'] };
+    const fetcher = (async (input: RequestInfo | URL) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+      if (url.pathname === '/development/v1/capabilities') return Response.json(caps);
+      if (url.hostname === 'registry.npmjs.org') return Response.json({ version: '99.0.0' });
+      return Response.json({ code: 'NOT_FOUND' }, { status: 404 });
+    }) as typeof fetch;
+    const online = await doctor(null, { server: 'https://versions.example', fetch: fetcher });
+    assert.equal(online.diagnostic, 'ok');
+    assert.equal(online.versions.latest, '99.0.0');
+    assert.equal(online.warnings[0]?.code, 'host_package_stale');
+    assert.match(online.warnings[0]?.recovery ?? '', /npm install -g @notchlet\/cli@latest/);
+    const offline = await doctor(null, { server: 'https://versions.example', fetch: (async () => { throw new TypeError('offline'); }) as typeof fetch });
+    assert.equal(offline.diagnostic, 'offline');
+    assert.deepEqual(offline.warnings, []);
+  } finally {
+    if (oldConfig === undefined) delete process.env.NOTCHLET_CONFIG_DIR; else process.env.NOTCHLET_CONFIG_DIR = oldConfig;
+    if (oldToken === undefined) delete process.env.NOTCHLET_TOKEN; else process.env.NOTCHLET_TOKEN = oldToken;
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('delivery before sync reports an actionable mapping error', async () => {

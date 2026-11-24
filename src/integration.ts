@@ -1,9 +1,10 @@
+import { readFileSync } from 'node:fs';
 import { readFile, writeFile, mkdir, lstat, readdir, rename, rm } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { BACKLOG_SCHEMA_VERSION, changeRefHash, inspectGitContext, parseChange, resolveChangeLocation, scaffold, readChange, readBacklogSidecar, writeBacklogSidecar, withLinkedItem, type BacklogSidecar, type Change } from '@notchlet/core';
+import { BACKLOG_SCHEMA_VERSION, CORE_VERSION, changeRefHash, coverageEvidenceFrom, evaluateState, evaluateVerificationFacets, inspectGitContext, parseChange, resolveChangeLocation, scaffold, readChange, readBacklogSidecar, writeBacklogSidecar, withLinkedItem, type BacklogSidecar, type Change } from '@notchlet/core';
 import { getProfile, resolveCredential, type AuthProfile, type CredentialStore } from './auth.js';
 import { deriveImportScaffold } from './import-scaffold.js';
 
@@ -19,7 +20,7 @@ const MAX_SYNC_BYTES = 1_048_576;
 const sha256 = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 const syncDir = (root: string) => path.join(root, '.notchlet', '.local', 'sync');
 
-interface SyncIdentity { key: string; relativePath: string; directory: string; changeId: string; sidecar: BacklogSidecar | null }
+interface SyncIdentity { key: string; relativePath: string; directory: string; changeId: string; scope: 'active' | 'archive'; sidecar: BacklogSidecar | null }
 /**
  * Remote work is identified by backlog item when linked, otherwise by a hash of the relative path, so
  * renames and moves never fork sync history. Flat legacy changes keep their ID-based file names.
@@ -30,7 +31,7 @@ async function syncIdentity(root: string, id: string): Promise<SyncIdentity> {
   const key = sidecar?.platform.itemId !== undefined
     ? `item-${sidecar.platform.itemId}`
     : location.relativePath === location.id ? location.id : `local-${changeRefHash(location.relativePath)}`;
-  return { key, relativePath: location.relativePath, directory: location.directory, changeId: location.id, sidecar };
+  return { key, relativePath: location.relativePath, directory: location.directory, changeId: location.id, scope: location.scope, sidecar };
 }
 async function syncState(root: string, id: string): Promise<any> {
   const { key } = await syncIdentity(root, id);
@@ -42,8 +43,10 @@ async function syncState(root: string, id: string): Promise<any> {
 }
 async function saveSyncState(root: string, id: string, state: any): Promise<void> {
   const { key } = await syncIdentity(root, id);
+  const existing = await syncState(root, id);
+  const merged = { ...(existing ?? {}), ...state };
   const dir = syncDir(root); await mkdir(dir, { recursive: true });
-  await writeFile(path.join(dir, `${key}.json`), `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(path.join(dir, `${key}.json`), `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 });
 }
 async function operationFile(root: string, id: string, step: string) {
   return path.join(syncDir(root), `${(await syncIdentity(root, id)).key}.${step}.operation.json`);
@@ -236,15 +239,87 @@ async function reconcileRemotePackage(root: string, id: string, localPackage: an
   } finally { await rm(transaction, { recursive: true, force: true }); }
 }
 
+export type PlatformBacklogStatus = 'TODO' | 'IN_PROGRESS' | 'IN_REVIEW' | 'DONE' | 'unlinked' | 'unknown';
+export type ReconciliationDeliveryState = 'not_delivered' | 'delivered' | 'delivery_partial';
+export interface SyncReconciliation {
+  platform: { status: PlatformBacklogStatus; itemId?: number; recordedStatus?: string; detail?: string };
+  local: { status: 'archived' | 'closed' | 'pending_review' | 'open'; archived: boolean; tasks: { completed: number; total: number }; verification: string; localClosure: 'open' | 'pending_review' | 'closed' };
+  delivery: { state: ReconciliationDeliveryState; status?: string; recordedAt?: string };
+  divergence: { code: 'status_divergent'; reason: 'platform_done_local_open' | 'local_closed_platform_open'; message: string; recovery: string } | null;
+}
+
+/** Live platform status via the backlog API; any failure degrades to `unknown` so reconciliation never breaks status. */
+async function liveBacklogStatus(itemId: number, options: SyncOptions): Promise<{ status?: string; detail?: string }> {
+  const profile = await getProfile(options.server);
+  if (!profile) return { detail: 'no_profile' };
+  try {
+    const item = profile.authMode === 'user'
+      ? await (await platformApi(options.server, options)).get(`/backlog/${itemId}`)
+      : resultValue(await callMcpTool('backlog_get', { itemId }, options));
+    const status = item?.status ?? item?.item?.status;
+    return typeof status === 'string' && status ? { status } : { detail: 'status_unavailable' };
+  } catch {
+    return { detail: 'platform_unavailable' };
+  }
+}
+
+async function syncReconciliation(root: string, identity: SyncIdentity, change: Change, state: any, options: SyncOptions): Promise<SyncReconciliation> {
+  const archived = identity.scope === 'archive';
+  const facets = await evaluateVerificationFacets(root, change.id, change);
+  const evaluation = evaluateState(change, { ...facets, coverageEvidence: coverageEvidenceFrom(facets) }, {}, undefined, { archived });
+  const local: SyncReconciliation['local'] = {
+    status: archived ? 'archived' : evaluation.localClosure.status,
+    archived,
+    tasks: { completed: evaluation.execution.completed, total: evaluation.execution.total },
+    verification: evaluation.verification.status,
+    localClosure: evaluation.localClosure.status,
+  };
+  const delivery: SyncReconciliation['delivery'] = state?.delivery && typeof state.delivery.state === 'string' && ['not_delivered', 'delivered', 'delivery_partial'].includes(state.delivery.state)
+    ? { state: state.delivery.state, ...(typeof state.delivery.status === 'string' ? { status: state.delivery.status } : {}), ...(typeof state.delivery.recordedAt === 'string' ? { recordedAt: state.delivery.recordedAt } : {}) }
+    : { state: 'not_delivered' };
+  const sidecarItemId = identity.sidecar?.platform.itemId;
+  const marker = sidecarItemId === undefined ? await importMarkerForChange(root, change.id) : null;
+  const itemId = sidecarItemId ?? marker?.itemId;
+  let platform: SyncReconciliation['platform'];
+  if (itemId === undefined) platform = { status: 'unlinked' };
+  else {
+    const live = await liveBacklogStatus(itemId, options);
+    platform = { ...(live.status ? { status: live.status as PlatformBacklogStatus } : { status: 'unknown' as const, ...(live.detail ? { detail: live.detail } : {}) }), itemId, ...(identity.sidecar?.platform.remoteStatus ? { recordedStatus: identity.sidecar.platform.remoteStatus } : {}) };
+  }
+  let divergence: SyncReconciliation['divergence'] = null;
+  if (platform.status === 'DONE' && evaluation.localClosure.status !== 'closed') {
+    divergence = {
+      code: 'status_divergent',
+      reason: 'platform_done_local_open',
+      message: `Platform item #${itemId} is DONE while the local change is ${local.status}.`,
+      recovery: `Resolve deliberately: reopen backlog item #${itemId} if local work remains, or record current evidence and run \`notchlet change close ${change.id}\` before delivering; then re-run \`notchlet sync status --change ${change.id}\`.`,
+    };
+  } else if (platform.status !== 'DONE' && platform.status !== 'unlinked' && platform.status !== 'unknown' && evaluation.localClosure.status === 'closed') {
+    divergence = {
+      code: 'status_divergent',
+      reason: 'local_closed_platform_open',
+      message: `The local change is ${local.status} while platform item #${itemId} is ${platform.status}.`,
+      recovery: `Publish the closure with \`notchlet sync push --change ${change.id}\` then \`notchlet sync deliver --change ${change.id} --status DONE\`, or reopen the local change if more work is required.`,
+    };
+  }
+  return { platform, local, delivery, divergence };
+}
+
 export async function syncStatus(root: string, id: string, options: SyncOptions = {}) {
+  const identity = await syncIdentity(root, id);
   const pkg = await changePackage(root, id), state = await syncState(root, id);
-  if (!state) return { change: id, state: 'local-only', localHash: pkg.hash, remoteId: null };
-  const ctx = await syncContext(root, options);
-  const response = await remoteJson(ctx, `/changes/${state.remoteId}/snapshots`);
-  if (!response.ok) throw new Error('Could not read remote snapshots.');
-  const page = await response.json() as any;
-  const latest = page.items?.sort((a: any, b: any) => b.revision - a.revision)[0];
-  return { change: id, remoteId: state.remoteId, baseHash: state.baseHash, localHash: pkg.hash, remoteHash: latest?.sha256 ?? null, remoteCapturedAt: latest?.createdAt ?? null, state: !latest ? 'remote-empty' : latest.sha256 === pkg.hash ? 'unchanged' : pkg.hash === state.baseHash ? 'remote-only' : latest.sha256 === state.baseHash ? 'local-only' : 'divergent' };
+  const reconciliation = await syncReconciliation(root, identity, pkg.payload.change, state, options);
+  if (!state) return { change: id, state: 'local-only', localHash: pkg.hash, remoteId: null, reconciliation };
+  try {
+    const ctx = await syncContext(root, options);
+    const response = await remoteJson(ctx, `/changes/${state.remoteId}/snapshots`);
+    if (!response.ok) throw new Error('Could not read remote snapshots.');
+    const page = await response.json() as any;
+    const latest = page.items?.sort((a: any, b: any) => b.revision - a.revision)[0];
+    return { change: id, remoteId: state.remoteId, baseHash: state.baseHash, localHash: pkg.hash, remoteHash: latest?.sha256 ?? null, remoteCapturedAt: latest?.createdAt ?? null, state: !latest ? 'remote-empty' : latest.sha256 === pkg.hash ? 'unchanged' : pkg.hash === state.baseHash ? 'remote-only' : latest.sha256 === state.baseHash ? 'local-only' : 'divergent', reconciliation };
+  } catch (error) {
+    return { change: id, remoteId: state.remoteId, baseHash: state.baseHash, localHash: pkg.hash, remoteHash: null, remoteCapturedAt: null, state: 'unknown', remoteError: error instanceof Error ? error.message : 'Remote snapshot state is unavailable.', reconciliation };
+  }
 }
 
 export async function syncPush(root: string, id: string, options: SyncOptions = {}) {
@@ -450,6 +525,7 @@ export async function syncDeliver(root: string, id: string, input: { status: 'TO
   if (!result || result.changeId !== local.remoteId || result.status === undefined) throw new Error('Reconciled delivery result does not match the pending operation.');
   await clearPendingOperation(root, id, 'delivery');
   const failed = result.status !== 'delivered';
+  await saveSyncState(root, id, { delivery: { state: failed ? 'delivery_partial' : 'delivered', status: input.status, recordedAt: new Date().toISOString() } });
   await updateSidecarSync(root, id, { remoteId: local.remoteId, ...(failed || input.status === undefined ? {} : { remoteStatus: input.status }) });
   return { state: failed ? 'delivery_partial' as const : 'delivered' as const, remoteId: local.remoteId, delivery: result };
 }
@@ -639,6 +715,7 @@ export async function autoSyncChange(root: string, id: string, options: SyncOpti
     if (status.state === 'unchanged') return { state: 'unchanged', change: id, remoteId: status.remoteId };
     if (status.state === 'remote-only') return { ...(await syncPull(root, id, options)), automatic: true };
     if (status.state === 'divergent') return { state: 'conflict', change: id, conflict: 'divergent_edits', nextAction: 'Local and remote edits differ from the shared base. Run sync status and resolve explicitly.' };
+    if (status.state === 'unknown') return { state: 'pending', change: id, message: (status as { remoteError?: string }).remoteError ?? 'Remote sync state is unavailable; local work remains saved.' };
     return { ...(await syncPush(root, id, { ...options, yes: true })), automatic: true };
   }
   catch (error) {
@@ -664,10 +741,53 @@ export async function callMcpTool<T = unknown>(toolName: string, args: Record<st
   } finally { await client.close().catch(() => undefined); }
 }
 
+const CLI_VERSION: string | null = (() => {
+  try {
+    const value = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: unknown };
+    return typeof value.version === 'string' ? value.version : null;
+  } catch { return null; }
+})();
+const REGISTRY_LATEST_URL = 'https://registry.npmjs.org/@notchlet/cli/latest';
+const versionTuple = (value: string): [number, number, number] | null => {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(value);
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+};
+export function versionWarnings(cli: string | null, core: string, latest: string | null): Array<{ code: string; message: string; recovery: string }> {
+  const warnings: Array<{ code: string; message: string; recovery: string }> = [];
+  if (cli && cli !== core) warnings.push({
+    code: 'version_skew',
+    message: `Installed @notchlet/cli ${cli} bundles @notchlet/core ${core}; the package versions differ.`,
+    recovery: `Install a matching release: npm install -g @notchlet/cli@latest (the current release bundles @notchlet/core ${core}).`,
+  });
+  const installed = cli ? versionTuple(cli) : null, published = latest ? versionTuple(latest) : null;
+  if (latest && installed && published && (published[0] > installed[0] || (published[0] === installed[0] && (published[1] > installed[1] || (published[1] === installed[1] && published[2] > installed[2]))))) warnings.push({
+    code: 'host_package_stale',
+    message: `Installed @notchlet/cli ${cli} is behind the latest published version ${latest}.`,
+    recovery: 'Upgrade the host package: npm install -g @notchlet/cli@latest.',
+  });
+  return warnings;
+}
+/** Best-effort registry lookup with a hard timeout; failures mean "unknown", never an error. */
+async function latestPublishedVersion(fetcher: Fetcher): Promise<string | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1500);
+  try {
+    const response = await fetcher(REGISTRY_LATEST_URL, { signal: controller.signal, headers: { Accept: 'application/json' } });
+    if (!response.ok) return null;
+    const payload = await response.json() as { version?: unknown };
+    return typeof payload?.version === 'string' && versionTuple(payload.version) ? payload.version : null;
+  } catch { return null; }
+  finally { clearTimeout(timer); }
+}
+
 export async function doctor(root: string | null, options: { server?: string; endpoint?: string; allowFileStore?: boolean; fetch?: Fetcher; store?: CredentialStore; loadStore?: () => Promise<CredentialStore> } = {}) {
   const git = await inspectGitContext(root ?? process.cwd());
   const profile = await getProfile(options.server);
-  if (!profile) return { online: false, profile: null, git, binding: null, diagnostic: 'no_profile' };
+  // The registry probe needs the network, so it only runs for configured profiles; skew detection stays local.
+  const latest = profile ? await latestPublishedVersion(options.fetch ?? fetch) : null;
+  const versions = { cli: CLI_VERSION, core: CORE_VERSION, latest, skew: Boolean(CLI_VERSION && CLI_VERSION !== CORE_VERSION) };
+  const warnings = versionWarnings(versions.cli, versions.core, versions.latest);
+  if (!profile) return { online: false, profile: null, git, binding: null, versions, warnings, diagnostic: 'no_profile' };
   let capabilities: Capabilities | null = null, online = false, diagnostic = 'offline';
   try {
     const discovered = await discoverCapabilities(profile, options);
@@ -695,7 +815,7 @@ export async function doctor(root: string | null, options: { server?: string; en
     }
   }
   const authScopes = !online ? [] : profile.authMode === 'user' ? ['workspace:read', 'changes:write', 'backlog:write'] : ['workspace:read'];
-  return { online, profile: { origin: profile.origin, serverIdentity: profile.serverIdentity, authMode: profile.authMode ?? 'token' }, capabilities, authScopes, git, binding, diagnostic };
+  return { online, profile: { origin: profile.origin, serverIdentity: profile.serverIdentity, authMode: profile.authMode ?? 'token' }, capabilities, authScopes, git, binding, versions, warnings, diagnostic };
 }
 
 export async function importBacklogItem(root: string, input: { productId: number; itemId: number; server?: string; endpoint?: string; allowFileStore?: boolean; fetch?: Fetcher; store?: CredentialStore; loadStore?: () => Promise<CredentialStore> }): Promise<Change> {
