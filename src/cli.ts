@@ -218,12 +218,20 @@ function itemPatchFromOptions(kind: ChangeItemKind): ChangeItemPatch {
     const requirementIds = optionValues('--requirement'); if (requirementIds.length) patch.requirementIds = requirementIds;
     const scenarioIds = optionValues('--scenario'); if (scenarioIds.length) patch.scenarioIds = scenarioIds;
     const taskIds = optionValues('--task'); if (taskIds.length) patch.taskIds = taskIds;
+    if (args.includes('--replace')) {
+      if (!requirementIds.length && !scenarioIds.length && !taskIds.length) fail('usage_error', '--replace requires at least one link option.', 'Combine --replace with --requirement, --scenario, or --task.', 64);
+      patch.replaceLinks = true;
+    }
   } else if (kind === 'scenario') { single('--requirement', 'requirementId'); single('--when', 'when'); single('--then', 'then'); }
   else if (kind === 'decision') { single('--decision', 'decision'); single('--rationale', 'rationale'); }
   else {
     single('--title', 'title');
     const dependencies = optionValues('--depends-on'); if (dependencies.length) patch.dependencies = dependencies;
     const requirementIds = optionValues('--requirement'); if (requirementIds.length) patch.requirementIds = requirementIds;
+    if (args.includes('--replace')) {
+      if (!requirementIds.length && !dependencies.length) fail('usage_error', '--replace requires at least one link option.', 'Combine --replace with --requirement or --depends-on.', 64);
+      patch.replaceLinks = true;
+    }
   }
   return patch;
 }
@@ -330,6 +338,9 @@ function changeItemHelp(action: 'add' | 'update', kind: ChangeItemKind): string 
     decision: '--decision <text> --rationale <text>',
     task: '--title <text> [--requirement <id[,id]>] [--depends-on <id[,id]>]',
   };
+  const linkNote = action === 'update' && (kind === 'check' || kind === 'task')
+    ? '\n  --replace           Replace the given link IDs instead of merging them additively'
+    : '';
   const examples: Record<ChangeItemKind, string> = {
     requirement: 'notchlet change add my-change requirement --id REQ-1 --title "Upload limits" --description "Uploads reject unsupported formats."',
     check: 'notchlet change add my-change check --id CHECK-1 --description "Run tests" --command "npm test" --requirement REQ-1 --task TASK-1\n  notchlet change add my-change check --id CHECK-2 --description "Receipt opens" --kind ui --url http://127.0.0.1:3000/ --wait-for "#app" --expected-visible-selector "#receipt" --expected-hidden-selector "#error" --step \'{"action":"click","selector":"#complete"}\'',
@@ -343,7 +354,7 @@ ${action === 'add' ? 'Required fields' : 'Editable fields'}:
   ${fields[kind]}
 
 Common options:
-  --revision <n>      Expected change revision; rejects a stale write
+  --revision <n>      Expected change revision; rejects a stale write${linkNote}
   --workspace <root>  Set workspace root
   --json              Machine-readable JSON output
 
@@ -1872,12 +1883,12 @@ Options:
   path <name|id> [artifact]      Print the resolved change directory or declared artifact path
   restore <name|id>              Move an archived change back to active work
   export <name|id> [--format json]   Export change metadata, closure, evidence, and artifacts
-  update <name|id> <kind> <id> [fields]   Edit one authored item in place
+  update <name|id> <kind> <id> [fields]   Edit one authored item in place; links merge additively unless --replace
   update <name|id> [options]     Update change fields, including run and verification metadata
   add <name|id> <kind> [options] Add a requirement, check, scenario, decision, or task
   remove <name|id> <kind> <id> [--revision <n>]   Remove an authored item
   convert <name|id> --schema <q|s> [--revision <n>] Convert a change schema
-  apply <name|id> --file <path> [--revision <n>]  Apply an ordered batch of authoring operations
+  apply <name|id> --file <path> [--revision <n>]  Apply an ordered batch of authoring operations; removal batches run order-independently, dependents first
   render <name|id> [--check|--write] [--force] [--tree]    Render model-derived proposal/spec/tasks artifacts
   baseline <name|id> [--capability <name>] [--revision <n>]
                                  Capture the current capability baseline revision
@@ -1916,6 +1927,7 @@ Authored content options:
   --when <text> --then <text>                           Acceptance scenario statements
   --decision <text> --rationale <text>                  Design decision fields
   --depends-on <id[,id]>                                Task dependency IDs
+  --replace                                             With link options, replace the given links instead of merging (check/task updates); batches use "replaceLinks": true
   --intent <text> --outcome <text>                      Change intent/outcome updates
   --capability-name <text> --capability-impact none|delta --capability-rationale <text>
   --run-command <cmd> --preview-url <url> --readiness-url <url>   Run metadata surfaced in instructions
@@ -2387,7 +2399,7 @@ Options:
         const itemKind = positional[3];
         if (itemKind !== undefined) {
           if (!isChangeKind(itemKind)) fail('usage_error', usage, 'Use `notchlet change update <change> requirement|check|scenario|decision|task <item-id> [fields]`.', 64);
-          assertOptions([...AUTHORED_OPTIONS[itemKind], '--revision'], `change update ${itemKind}`);
+          assertOptions([...AUTHORED_OPTIONS[itemKind], '--revision', ...(itemKind === 'check' || itemKind === 'task' ? ['--replace'] : [])], `change update ${itemKind}`);
           const root = await requireWorkspace('change update');
           const changeRef = positional[2];
           const itemId = positional[4];
