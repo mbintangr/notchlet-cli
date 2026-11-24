@@ -202,3 +202,93 @@ test('authoring surfaces the setup advisory for mutating UI checks', async () =>
     assert.deepEqual(JSON.parse(quiet.stdout).warnings, []);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('link updates merge additively, honor --replace, and removal batches run with dependents first', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'notchlet-cli-link-semantics-'));
+  const cli = process.env.NOTCHLET_PACKED_CLI_PATH ?? path.resolve('dist/cli.js');
+  const run = (args: string[]) => spawnSync(process.execPath, [cli, ...args], { cwd: dir, encoding: 'utf8', timeout: 20000 });
+  try {
+    assert.equal(run(['init', '--local']).status, 0);
+    const created = run(['change', 'new', 'Link semantics', '--json']);
+    assert.equal(created.status, 0, created.stderr);
+    const id = JSON.parse(created.stdout).data.id as string;
+    const tasksFile = path.join(dir, '.notchlet', 'changes', id, 'tasks.json');
+    const change = () => JSON.parse(run(['change', 'show', id, '--json']).stdout).data.change;
+    const revision = async () => JSON.parse(await readFile(tasksFile, 'utf8')).revision as number;
+
+    const step = (args: string[]) => { const result = run(args); assert.equal(result.status, 0, result.stderr); return JSON.parse(result.stdout); };
+    step(['change', 'update', id, '--intent', 'Edit links safely', '--json']);
+    step(['change', 'add', id, 'requirement', '--id', 'REQ-1', '--title', 'One', '--description', 'One', '--json']);
+    step(['change', 'add', id, 'requirement', '--id', 'REQ-2', '--title', 'Two', '--description', 'Two', '--json']);
+    step(['change', 'add', id, 'task', '--id', 'TASK-1', '--title', 'Root', '--requirement', 'REQ-1', '--json']);
+    step(['change', 'add', id, 'task', '--id', 'TASK-2', '--title', 'Dependent', '--requirement', 'REQ-1', '--depends-on', 'TASK-1', '--json']);
+    step(['change', 'add', id, 'check', '--id', 'CHECK-1', '--description', 'Check links', '--command', 'node --version', '--requirement', 'REQ-1', '--task', 'TASK-1', '--no-prompt', '--json']);
+    step(['change', 'add', id, 'scenario', '--id', 'SCN-1', '--requirement', 'REQ-1', '--when', 'Links change', '--then', 'Links merge', '--json']);
+
+    step(['change', 'update', id, 'check', 'CHECK-1', '--requirement', 'REQ-2', '--task', 'TASK-2', '--json']);
+    assert.deepEqual(change().checks[0].requirementIds, ['REQ-1', 'REQ-2']);
+    assert.deepEqual(change().checks[0].taskIds, ['TASK-1', 'TASK-2']);
+
+    step(['change', 'update', id, 'check', 'CHECK-1', '--task', 'TASK-2', '--replace', '--json']);
+    assert.deepEqual(change().checks[0].taskIds, ['TASK-2']);
+    assert.deepEqual(change().checks[0].requirementIds, ['REQ-1', 'REQ-2']);
+
+    const replaceWithoutLinks = run(['change', 'update', id, 'check', 'CHECK-1', '--replace', '--json']);
+    assert.equal(replaceWithoutLinks.status, 64);
+    assert.match(JSON.parse(replaceWithoutLinks.stdout).error.message, /--replace requires at least one link option/);
+    const replaceOnRequirement = run(['change', 'update', id, 'requirement', 'REQ-1', '--title', 'Renamed', '--replace', '--json']);
+    assert.equal(replaceOnRequirement.status, 64);
+    assert.match(JSON.parse(replaceOnRequirement.stdout).error.message, /Unsupported option --replace/);
+
+    step(['change', 'update', id, 'task', 'TASK-2', '--requirement', 'REQ-2', '--json']);
+    assert.deepEqual(change().tasks[1].requirementIds, ['REQ-1', 'REQ-2']);
+    assert.deepEqual(change().tasks[1].dependencies, ['TASK-1']);
+    step(['change', 'update', id, 'task', 'TASK-2', '--requirement', 'REQ-2', '--replace', '--json']);
+    assert.deepEqual(change().tasks[1].requirementIds, ['REQ-2']);
+    assert.deepEqual(change().tasks[1].dependencies, ['TASK-1']);
+
+    const batchFile = path.join(dir, 'batch.json');
+    await writeFile(batchFile, JSON.stringify({
+      expectedRevision: await revision(),
+      operations: [{ op: 'update', kind: 'check', id: 'CHECK-1', taskIds: ['TASK-1'], replaceLinks: true }],
+    }));
+    const applied = run(['change', 'apply', id, '--file', batchFile, '--json']);
+    assert.equal(applied.status, 0, applied.stderr);
+    assert.deepEqual(JSON.parse(applied.stdout).data.change.checks[0].taskIds, ['TASK-1']);
+    assert.deepEqual(JSON.parse(applied.stdout).data.change.checks[0].requirementIds, ['REQ-1', 'REQ-2']);
+
+    const revisionBeforeBadBatch = await revision();
+    await writeFile(batchFile, JSON.stringify({ expectedRevision: revisionBeforeBadBatch, operations: [{ op: 'update', kind: 'check', id: 'CHECK-1', replaceLinks: true }] }));
+    const badBatch = run(['change', 'apply', id, '--file', batchFile, '--json']);
+    assert.equal(badBatch.status, 1);
+    assert.equal(JSON.parse(badBatch.stdout).error.code, 'invalid_schema');
+    assert.match(JSON.parse(badBatch.stdout).error.message, /replaceLinks requires at least one link field/);
+
+    const outsideBatch = run(['change', 'remove', id, 'requirement', 'REQ-1', '--json']);
+    assert.equal(outsideBatch.status, 1);
+    assert.equal(JSON.parse(outsideBatch.stdout).error.code, 'requirement_in_use');
+    const recovery = JSON.parse(outsideBatch.stdout).error.recovery as string;
+    for (const dependent of ['CHECK-1', 'SCN-1', 'TASK-1']) assert.ok(recovery.includes(dependent), `${dependent} missing from: ${recovery}`);
+    assert.equal(await revision(), revisionBeforeBadBatch);
+
+    await writeFile(batchFile, JSON.stringify({
+      expectedRevision: revisionBeforeBadBatch,
+      operations: [
+        { op: 'remove', kind: 'requirement', id: 'REQ-1' },
+        { op: 'remove', kind: 'task', id: 'TASK-1' },
+        { op: 'remove', kind: 'check', id: 'CHECK-1' },
+        { op: 'remove', kind: 'task', id: 'TASK-2' },
+        { op: 'remove', kind: 'scenario', id: 'SCN-1' },
+        { op: 'remove', kind: 'requirement', id: 'REQ-2' },
+      ],
+    }));
+    const removed = run(['change', 'apply', id, '--file', batchFile, '--json']);
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.equal(JSON.parse(removed.stdout).data.applied, 6);
+    const emptied = JSON.parse(removed.stdout).data.change;
+    assert.deepEqual(emptied.requirements, []);
+    assert.deepEqual(emptied.acceptanceScenarios, []);
+    assert.deepEqual(emptied.checks, []);
+    assert.deepEqual(emptied.tasks, []);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
